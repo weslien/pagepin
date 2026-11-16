@@ -65,6 +65,7 @@ export async function mintToken(
     lastUsedAt: null,
     expiresAt,
     revokedAt: null,
+    scopes: null, // null = 全权(W2 接线后由铸造参数决定)
   };
   await db.insert(apiTokens).values(row);
   return { row, plaintext: raw };

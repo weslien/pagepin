@@ -6,7 +6,17 @@
  *   D1 用 `wrangler d1 migrations apply pagepin --remote`(见 package.json 的 cf:deploy)。
  */
 
-import { index, integer, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import {
+  index,
+  integer,
+  primaryKey,
+  real,
+  sqliteTable,
+  text,
+  uniqueIndex,
+} from 'drizzle-orm/sqlite-core';
+
+import type { SiteRole } from '../rbac.js';
 
 export interface SiteVersion {
   id: string; // uuid
@@ -186,6 +196,7 @@ export const apiTokens = sqliteTable(
     lastUsedAt: text('last_used_at'),
     expiresAt: text('expires_at'), // 非空 = 到期即拒(设备授权铸的 token 用;普通 PAT 为 null = 不过期)
     revokedAt: text('revoked_at'), // 软吊销;命中即拒
+    scopes: text('scopes', { mode: 'json' }).$type<string[]>(), // token 级 scope(W2 接线):JSON string[];null/空 = 全权
   },
   (t) => [uniqueIndex('tokens_hash_uq').on(t.tokenHash), index('tokens_user_idx').on(t.userId)],
 );
@@ -232,6 +243,7 @@ export const deviceAuths = sqliteTable(
     createdAt: text('created_at').notNull(),
     expiresAt: text('expires_at').notNull(), // ISO;过期即作废
     approvedAt: text('approved_at'),
+    scopes: text('scopes', { mode: 'json' }).$type<string[]>(), // 同 api_tokens.scopes;null = 全权
   },
   (t) => [
     uniqueIndex('device_code_uq').on(t.deviceCode),
@@ -299,6 +311,48 @@ export const accountMerges = sqliteTable(
   (t) => [uniqueIndex('account_merges_loser_uq').on(t.loserId)],
 );
 
+/** 站点成员表(RBAC,见 src/rbac.ts)—— 站长签发的显式成员与角色;路由接入在后续 wave。
+ *  站长本人不在本表:sites.ownerId 恒真身。一 (site,user) 一行,改角色 = 原地 UPDATE。 */
+export const siteMembers = sqliteTable(
+  'site_members',
+  {
+    id: text('id').primaryKey(),
+    siteId: text('site_id').notNull(),
+    userId: text('user_id').notNull(),
+    role: text('role').$type<SiteRole>().notNull(), // owner|editor|commenter|viewer(D1 四值)
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => [
+    uniqueIndex('site_members_site_user_uq').on(t.siteId, t.userId),
+    index('site_members_user_idx').on(t.userId), // 合并重指/用户侧查询
+  ],
+);
+
+/** 用户 ← IdP group 映射 —— 登录时整组替换(W5 接线);group_name 原样保留、大小写敏感。复合主键,无独立 id。 */
+export const userGroups = sqliteTable(
+  'user_groups',
+  {
+    userId: text('user_id').notNull(),
+    groupName: text('group_name').notNull(),
+    syncedAt: text('synced_at').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.groupName] })],
+);
+
+/** 组授予 —— 某命名 group 对某站点的角色(IdP ACL);解析时封顶 editor(见 src/rbac.ts)。 */
+export const groupGrants = sqliteTable(
+  'group_grants',
+  {
+    id: text('id').primaryKey(),
+    siteId: text('site_id').notNull(),
+    groupName: text('group_name').notNull(), // 须与 user_groups.group_name 精确匹配
+    role: text('role').$type<SiteRole>().notNull(),
+    createdBy: text('created_by').notNull(), // = users.id(签发人)
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => [uniqueIndex('group_grants_site_group_uq').on(t.siteId, t.groupName)],
+);
+
 export type UserRow = typeof users.$inferSelect;
 export type IdentityRow = typeof identities.$inferSelect;
 export type AccountMergeRow = typeof accountMerges.$inferSelect;
@@ -310,6 +364,9 @@ export type InviteRow = typeof invites.$inferSelect;
 export type DeviceAuthRow = typeof deviceAuths.$inferSelect;
 export type HandoffCodeRow = typeof handoffCodes.$inferSelect;
 export type DeploySessionRow = typeof deploySessions.$inferSelect;
+export type SiteMemberRow = typeof siteMembers.$inferSelect;
+export type UserGroupRow = typeof userGroups.$inferSelect;
+export type GroupGrantRow = typeof groupGrants.$inferSelect;
 
 /** site.versions 里找当前版本(对应 Site.current_version())。 */
 export function currentVersion(site: SiteRow): SiteVersion | null {
