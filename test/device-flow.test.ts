@@ -264,4 +264,59 @@ test('device flow: request lookup returns the pending scope for the approve scre
   });
 
   assert.equal((await get(app, '/api/device/request/ZZZZ-ZZZZ')).status, 404); // 未知码
+
+  // 行在但已过期 → 同样 404(与 approve 的过期处理同一口径)
+  await deps.db
+    .update(deviceAuths)
+    .set({ expiresAt: new Date(Date.now() - 1000).toISOString() })
+    .where(eq(deviceAuths.userCode, code.user_code));
+  assert.equal((await get(app, '/api/device/request/' + code.user_code)).status, 404);
+});
+
+test('device flow: request lookup is cookie-only (anonymous 401, PAT 403)', async () => {
+  // 真实中间件件(test 4 同款):证明此读口必须 cookie 会话 —— 换成 currentUser 的回归会在这里红
+  const db = await makeTestDb();
+  await db.insert(users).values({
+    id: 'u-test',
+    email: 'admin@example.com',
+    passwordHash: null,
+    oidcSub: null,
+    handle: 'admin',
+    displayName: 'Admin',
+    isAdmin: true,
+    disabled: false,
+    createdAt: nowIso(),
+    lastLoginAt: null,
+  });
+  const deps: AppDeps = { config: cfg, db, storage: {} as unknown as Storage };
+  const app = makeDeviceRoutes(deps, makeAuthMiddleware(deps));
+
+  assert.equal(
+    (await app.fetch(new Request('http://localhost/api/device/request/ABCD-EFGH'))).status,
+    401,
+  );
+
+  const raw = 'pp_cookiegate00000000000000000000000000000';
+  const shaRaw = async (s: string) => {
+    const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+    return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  };
+  await db.insert(apiTokens).values({
+    id: 'tok-gate',
+    userId: 'u-test',
+    name: 't',
+    tokenHash: await shaRaw(raw),
+    prefix: raw.slice(0, 15),
+    createdAt: nowIso(),
+    lastUsedAt: null,
+    expiresAt: null,
+    revokedAt: null,
+    scopes: ['read'],
+  });
+  const viaPat = await app.fetch(
+    new Request('http://localhost/api/device/request/ABCD-EFGH', {
+      headers: { Authorization: `Bearer ${raw}` },
+    }),
+  );
+  assert.equal(viaPat.status, 403); // 合法 PAT 也不行 —— 管理读口只认 cookie 会话(auth.token.consoleOnly)
 });

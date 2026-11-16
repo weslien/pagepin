@@ -190,6 +190,7 @@ export function makeDeviceRoutes(deps: AppDeps, mw: AuthMiddleware): Hono<AppEnv
   });
 
   // 审批屏读取(W6 前console 直连):cookie 会话看 pending 码申请的 scope,把「将授予什么」摆给人。
+  // 任意登录会话可查(与 approve/deny 同性质,靠 user_code 高熵 + 短 TTL 防探);scopes=null 表示申请「全权」。
   app.get('/api/device/request/:userCode', mw.cookieUser, async (c) => {
     const userCode = c.req.param('userCode').trim().toUpperCase(); // 归一与 approve 同款
     const rec = (await db.select().from(deviceAuths).where(eq(deviceAuths.userCode, userCode)))[0];
