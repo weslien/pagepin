@@ -23,6 +23,9 @@ export type AppEnv = {
     user: UserRow;
     authVia: 'cookie' | 'token';
     sessionClaims?: SessionClaims;
+    /** token 级 scopes:tokenUser 从 api_tokens.scopes 注入;cookie 会话不 set(保持 undefined)。
+     *  undefined/null/空数组 = 全权(既有 token 不收窄);requireScope 以此闸部署族与评论线程写。 */
+    tokenScopes?: string[] | null;
     /** 请求 locale,由 makeLocaleMiddleware 解析后注入(见 i18n/locale.ts)。 */
     locale: Locale;
     /** 滑动续期要补的 Set-Cookie(序列化好的完整值;分享会话/viewer 会话共用)。serve() 内多为

@@ -76,6 +76,7 @@ export function makeAuthMiddleware(deps: AppDeps): AuthMiddleware {
     if (!user) return jsonError(c, 401, 'auth.token.userNotFound');
     if (user.disabled) return jsonError(c, 403, 'auth.account.disabled');
     c.set('authVia', 'token');
+    c.set('tokenScopes', rec.scopes); // null/空 = 全权;cookie 会话不 set,requireScope 对其恒放行
     // last_used_at 节流写(5 分钟粒度足够审计,省掉每请求一次写库)
     if (!rec.lastUsedAt || Date.now() - Date.parse(rec.lastUsedAt) > 300_000) {
       await db.update(apiTokens).set({ lastUsedAt: nowIso() }).where(eq(apiTokens.id, rec.id));
@@ -181,4 +182,16 @@ export function makeAuthMiddleware(deps: AppDeps): AuthMiddleware {
     adminMutatingUser,
     requireVerified,
   };
+}
+
+/** token 级 scope 类别(与 D1 角色枚举无关,token 专属):publish = 部署族;comment = 评论线程写。 */
+export type ScopeKind = 'publish' | 'comment';
+
+/** token 级 scope 闸(设计§5):tokenUser 注入的 stored scopes 含 kind 才放行,否则 403。
+ *  未设(cookie 会话/内容面访客)、null、空数组 = 全权 —— 既有 token 与浏览器路径一律不收窄。
+ *  读类路由不闸:合法 token 恒可读(评论导出、版本列表等)。调用点须置于一切库查询之前。 */
+export function requireScope(c: Context<AppEnv>, kind: ScopeKind): Response | undefined {
+  const scopes = c.get('tokenScopes');
+  if (scopes == null || scopes.length === 0 || scopes.includes(kind)) return undefined;
+  return jsonError(c, 403, 'auth.token.scope');
 }
