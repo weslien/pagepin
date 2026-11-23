@@ -24,16 +24,25 @@ import { t, type Locale } from '../i18n/index.js';
 import { jsonError, localeOf } from '../i18n/locale.js';
 import type { AppDeps, AppEnv } from '../types.js';
 import { canonicalEmail, nowIso, uuid, validEmail } from '../util.js';
-import { buildAuthorizeUrl, exchangeCode, OidcError, type OidcIdentity } from './oidc.js';
+import {
+  buildAuthorizeUrl,
+  buildEndSessionUrl,
+  exchangeCode,
+  OidcError,
+  type OidcLogin,
+} from './oidc.js';
 import { hashPassword, verifyPassword } from './password.js';
 import { exchangeSocialCode, socialAuthorizeUrl } from './social.js';
 import { reconcileByVerifiedEmail } from './reconcile.js';
 import { readVerifyToken, sendVerificationEmail } from '../mail/verify.js';
 import { verifyTurnstile } from './turnstile.js';
 import {
+  clearIdTokenCookie,
   clearLoginCookies,
   consumeOauthNonce,
+  readIdTokenCookie,
   readSession,
+  setIdTokenCookie,
   setLoginCookies,
   setOauthNonce,
   type Plane,
@@ -665,7 +674,7 @@ export function makeAuthRoutes(deps: AppDeps, plane: Plane): Hono<AppEnv> {
     if (!st || st.pln !== plane || !consumeOauthNonce(c, st.non)) {
       return jsonError(c, 400, 'auth.oauth.stateInvalid');
     }
-    let info: OidcIdentity;
+    let info: OidcLogin;
     try {
       info = await exchangeCode(cfg.oidc!, code, redirectUri(c, cfg));
     } catch (e) {
@@ -683,6 +692,8 @@ export function makeAuthRoutes(deps: AppDeps, plane: Plane): Hono<AppEnv> {
     // Group-claim sync runs on the login success path only: a disabled account (gate above) writes nothing.
     await syncUserGroups(deps, user, info.groups);
     await setLoginCookies(c, cfg, plane, user.id, user.handle, user.sessionEpoch);
+    // Keep the IdP id_token as the RP-logout hint; logout sends it back as id_token_hint.
+    if (info.idToken) setIdTokenCookie(c, cfg, info.idToken);
     return c.redirect(safeNext(typeof st.nxt === 'string' ? st.nxt : null), 302);
   });
 
@@ -821,8 +832,23 @@ export function makeAuthRoutes(deps: AppDeps, plane: Plane): Hono<AppEnv> {
     });
   }
 
-  app.post('/auth/logout', (c) => {
+  app.post('/auth/logout', async (c) => {
     clearLoginCookies(c, plane);
+    // RP-initiated logout (oidc only): local cookies are dead above, but the IdP SSO
+    // session outlives them — send the browser to end_session so it dies too. Gated on
+    // the login-time id_token hint: without it (social login, pre-fix session) logout
+    // stays exactly what it was. Any IdP failure falls back to a local-only logout.
+    if (cfg.authMode === 'oidc') {
+      const hint = readIdTokenCookie(c);
+      if (hint) {
+        clearIdTokenCookie(c);
+        try {
+          return c.redirect(await buildEndSessionUrl(cfg.oidc!, hint), 302);
+        } catch {
+          /* logout must never fail on an IdP outage */
+        }
+      }
+    }
     return c.redirect('/', 302);
   });
 
