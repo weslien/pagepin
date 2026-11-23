@@ -17,7 +17,7 @@ import { and, eq, isNull, lt, sql } from 'drizzle-orm';
 
 import { escapeHtml, gateDoc, GLOBE_SVG, LOCK_SVG } from '../brand-gate.js';
 import { consoleBase, contentBase, type Config } from '../config.js';
-import { handoffCodes, identities, invites, users, type UserRow } from '../db/index.js';
+import { handoffCodes, identities, invites, userGroups, users, type UserRow } from '../db/index.js';
 import { writtenCount } from '../db/ops.js';
 import { effectiveRegistrationMode } from '../instance-settings.js';
 import { t, type Locale } from '../i18n/index.js';
@@ -480,6 +480,47 @@ export async function attachIdentity(
   return 'ok';
 }
 
+/** OIDC groups-claim sync (W5): replace the user's stored group rows with the claim list. Called only
+ *  from the OIDC callback — social/identity-link paths never sync. Ingestion is off while
+ *  PAGEPIN_OIDC_GROUPS_CLAIM is unset (stored rows untouched). An absent-or-not-a-list claim clears
+ *  the rows and warns once (this warn is the only operator signal on a mis-mapped claim; log the
+ *  claim name + user id only, never group values). An empty array clears silently. Admin sync only
+ *  ever grants (isAdmin := true); clearing admin stays a manual console action by design. */
+async function syncUserGroups(
+  deps: AppDeps,
+  user: UserRow,
+  groups: string[] | undefined,
+): Promise<void> {
+  const oidc = deps.config.oidc;
+  if (!oidc?.groupsClaim) return; // ingestion disabled: no writes, no logs
+  if (groups === undefined) {
+    console.warn(
+      `[auth] oidc groups claim "${oidc.groupsClaim}" is missing or not a list; ` +
+        `cleared stored groups for user ${user.id}`,
+    );
+    await deps.db.delete(userGroups).where(eq(userGroups.userId, user.id));
+    return;
+  }
+  await deps.db.delete(userGroups).where(eq(userGroups.userId, user.id));
+  const names = [...new Set(groups)]; // dedupe guards the (user_id, group_name) composite PK
+  const rows = names.map((groupName) => ({ userId: user.id, groupName, syncedAt: nowIso() }));
+  if (rows.length > 0) {
+    try {
+      await deps.db.insert(userGroups).values(rows);
+    } catch {
+      // Two concurrent logins for the same user can interleave delete/insert and lose the
+      // composite-PK race (D1 has no interactive transactions). Redo the replacement once so
+      // the login still succeeds; a repeat failure throws and fails the callback as before.
+      await deps.db.delete(userGroups).where(eq(userGroups.userId, user.id));
+      await deps.db.insert(userGroups).values(rows);
+    }
+  }
+  const adminGroups = oidc.adminGroups;
+  if (adminGroups && names.some((n) => adminGroups.includes(n))) {
+    await deps.db.update(users).set({ isAdmin: true }).where(eq(users.id, user.id));
+  }
+}
+
 export function makeAuthRoutes(deps: AppDeps, plane: Plane): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
   const cfg = deps.config;
@@ -639,6 +680,8 @@ export function makeAuthRoutes(deps: AppDeps, plane: Plane): Hono<AppEnv> {
       emailVerified: info.emailVerified,
     });
     if (user.disabled) return jsonError(c, 403, 'auth.account.disabled');
+    // Group-claim sync runs on the login success path only: a disabled account (gate above) writes nothing.
+    await syncUserGroups(deps, user, info.groups);
     await setLoginCookies(c, cfg, plane, user.id, user.handle, user.sessionEpoch);
     return c.redirect(safeNext(typeof st.nxt === 'string' ? st.nxt : null), 302);
   });

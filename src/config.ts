@@ -19,6 +19,10 @@ export interface OidcConfig {
   scopes: string;
   /** 附加到 authorize URL 的额外 query(如 Casdoor 的 provider_hint),JSON 对象 */
   authParams: Record<string, string>;
+  /** Userinfo claim carrying the IdP group list (W5); unset disables group ingestion at login. */
+  groupsClaim?: string;
+  /** Claim groups that grant instance admin at login (W5); ingestion only ever grants, never clears. */
+  adminGroups?: string[];
 }
 
 export interface S3Config {
@@ -181,12 +185,35 @@ export function loadConfig(env: Env): Config {
     if (env.PAGEPIN_OIDC_AUTH_PARAMS) {
       authParams = JSON.parse(env.PAGEPIN_OIDC_AUTH_PARAMS) as Record<string, string>;
     }
+    // W5 groups-claim ingestion knobs. Like every OIDC knob, they parse only in oidc mode;
+    // a set-but-empty value fails fast instead of silently degrading (social/turnstile precedent).
+    let groupsClaim: OidcConfig['groupsClaim'];
+    const gcRaw = env.PAGEPIN_OIDC_GROUPS_CLAIM;
+    if (gcRaw !== undefined && gcRaw !== '') {
+      groupsClaim = gcRaw.trim();
+      if (!groupsClaim) {
+        throw new Error(`PAGEPIN_OIDC_GROUPS_CLAIM must be a claim name, received: ${gcRaw}`);
+      }
+    }
+    let adminGroups: OidcConfig['adminGroups'];
+    const agRaw = env.PAGEPIN_ADMIN_GROUPS;
+    if (agRaw !== undefined && agRaw !== '') {
+      adminGroups = agRaw
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (!adminGroups.length) {
+        throw new Error(`PAGEPIN_ADMIN_GROUPS must list at least one group, received: ${agRaw}`);
+      }
+    }
     oidc = {
       issuer: issuer.replace(/\/+$/, ''),
       clientId,
       clientSecret,
       scopes: str(env, 'PAGEPIN_OIDC_SCOPES', 'openid profile email'),
       authParams,
+      groupsClaim,
+      adminGroups,
     };
   }
 

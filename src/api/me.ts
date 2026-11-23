@@ -19,6 +19,7 @@ import {
   currentVersion,
   identities,
   sites,
+  userGroups,
   users,
 } from '../db/index.js';
 import type { AppDeps, AppEnv } from '../types.js';
@@ -144,6 +145,18 @@ export function makeMeRoutes(deps: AppDeps, mw: AuthMw): Hono<AppEnv> {
         }))
         .sort((a, b) => a.created_at.localeCompare(b.created_at)),
     });
+  });
+
+  /** The viewer's synced group names (W5 readback), ordered by name. Empty when ingestion is off
+   *  (no PAGEPIN_OIDC_GROUPS_CLAIM) or the account has no groups. */
+  app.get('/api/me/groups', mw.currentUser, async (c) => {
+    const user = c.get('user');
+    const rows = await db
+      .select({ groupName: userGroups.groupName })
+      .from(userGroups)
+      .where(eq(userGroups.userId, user.id))
+      .orderBy(userGroups.groupName);
+    return c.json({ groups: rows.map((r) => r.groupName) });
   });
 
   /** 断开一个登录身份。不能断开最后一个(否则锁死账号);断开 password 同时清掉本地密码。

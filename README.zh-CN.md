@@ -92,6 +92,8 @@ Claude Code 也可作为插件安装：
 | `PAGEPIN_ADMIN_EMAIL` / `…_PASSWORD` | — | 两者都设则启动时 upsert 一个管理员；否则首个注册者成为管理员。 |
 | `PAGEPIN_AUTH_MODE` | `password` | `password`、`oidc` 或 `none`（仅开发：自动以管理员身份登录）。 |
 | `PAGEPIN_SITE_ACCESS_MODE` | `open` | `open` 或 `members`（设置后锁定控制台 UI）。`members`：私有站点仅向站点成员开放；已登录的非成员收到 403 页面；分享链接与公开窗口保持开放。 |
+| `PAGEPIN_OIDC_GROUPS_CLAIM` | — | 仅 OIDC：userinfo 中携带 IdP 分组列表的 claim 名（JSON 字符串数组）。未设置则不做摄取。设置后，每次登录都用该 claim 整组替换此用户的已存分组行（经 `GET /api/me/groups` 读回）；claim 缺失或不是列表时清空分组行并记一条警告。 |
+| `PAGEPIN_ADMIN_GROUPS` | — | 仅 OIDC：逗号分隔的 claim 分组名，命中即在登录时授予实例管理员。摄取永远不会自动清除管理员；取消管理员须手动操作。 |
 | `PAGEPIN_DEFAULT_LOCALE` | `en` | 回落语言（`en` 或 `zh`）。每次请求按 `?lang=` → `pp_lang` cookie → `Accept-Language` 覆盖。 |
 | `PAGEPIN_STORAGE` | `fs` | `fs`（本地磁盘）或 `s3`（S3 兼容）。 |
 
