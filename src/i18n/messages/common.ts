@@ -64,6 +64,17 @@ export const common: Record<Locale, Record<string, string>> = {
     // —— 站点(comments.ts + sites.ts 共用) ——
     'site.notFound': 'Site not found',
     'site.path.invalid': 'Invalid path',
+
+    // —— 站点角色/成员/组授予(sites.ts 能力解析,W3) ——
+    'site.access.forbidden': 'Your role on this site does not allow this action',
+    'site.access.ambiguous':
+      'This slug matches more than one accessible site; use the site owner account',
+    'site.members.notFound': 'Site member not found',
+    'site.members.roleInvalid': 'Member role must be one of editor, commenter, viewer',
+    'site.members.handleNotFound': 'No account has this handle',
+    'site.grants.notFound': 'Group grant not found',
+    'site.grants.roleInvalid': 'Grant role must be one of editor, commenter, viewer',
+    'site.grants.groupNameEmpty': 'Group name cannot be empty',
   },
   zh: {
     // —— 通用 / 请求体 ——
@@ -115,5 +126,15 @@ export const common: Record<Locale, Record<string, string>> = {
     // —— 站点(comments.ts + sites.ts 共用) ——
     'site.notFound': '站点不存在',
     'site.path.invalid': '非法路径',
+
+    // —— 站点角色/成员/组授予(sites.ts 能力解析,W3) ——
+    'site.access.forbidden': '你在这个站点上的角色不允许此操作',
+    'site.access.ambiguous': '该 slug 命中多个可访问的站点；请用站长账号操作',
+    'site.members.notFound': '站点成员不存在',
+    'site.members.roleInvalid': '成员角色必须是 editor、commenter 或 viewer',
+    'site.members.handleNotFound': '不存在该 handle 对应的账号',
+    'site.grants.notFound': '组授予不存在',
+    'site.grants.roleInvalid': '授予角色必须是 editor、commenter 或 viewer',
+    'site.grants.groupNameEmpty': '组名不能为空',
   },
 };

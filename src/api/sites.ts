@@ -17,8 +17,12 @@ import {
   commentThreads,
   currentVersion,
   deploySessions,
+  groupGrants,
   shareLinks,
+  siteMembers,
   sites,
+  userGroups,
+  users,
   type Db,
   type DeploySessionRow,
   type PendingFile,
@@ -30,6 +34,7 @@ import {
 import { writtenCount } from '../db/ops.js';
 import { errorBody, t, type Locale } from '../i18n/index.js';
 import { jsonError, localeOf } from '../i18n/locale.js';
+import { resolveSiteAccess, type SiteRole } from '../rbac.js';
 import { purgeSiteStorage, type Storage } from '../storage/index.js';
 import { guessContentType } from '../storage/mime.js';
 import type { AppDeps, AppEnv } from '../types.js';
@@ -51,7 +56,7 @@ function handleRequiredError(c: Context<AppEnv>) {
   );
 }
 
-function siteOut(deps: AppDeps, site: SiteRow, unresolved: number) {
+function siteOut(deps: AppDeps, site: SiteRow, unresolved: number, yourRole: SiteRole) {
   const cur = currentVersion(site);
   return {
     slug: site.slug,
@@ -72,6 +77,7 @@ function siteOut(deps: AppDeps, site: SiteRow, unresolved: number) {
     version_count: site.versions.length,
     created_at: site.createdAt,
     updated_at: site.updatedAt,
+    your_role: yourRole, // 请求者在解析后站点上的角色(W3 能力解析)
   };
 }
 
@@ -112,6 +118,112 @@ async function ownedSite(db: Db, userId: string, slug: string): Promise<SiteRow 
         .where(and(eq(sites.ownerId, userId), eq(sites.slug, slug), isNull(sites.deletedAt)))
     )[0] ?? null
   );
+}
+
+/** 站点角色等级(与 src/rbac.ts 的 RANK 同值;本地副本,W1 纯函数文件不动)。 */
+const ROLE_RANK: Record<SiteRole, number> = { viewer: 0, commenter: 1, editor: 2, owner: 3 };
+
+/** 行级可存角色(成员/组授予):owner 恒为 sites.ownerId,不经行级授予;
+ *  组授予解析时封顶 editor(rbac.ts),写侧直接拒绝 owner。 */
+function grantableRole(r: unknown): r is 'editor' | 'commenter' | 'viewer' {
+  return r === 'editor' || r === 'commenter' || r === 'viewer';
+}
+
+/** 能力解析(设计§6):先取本人站点;否则在同名 slug 站点里找「恰好一个」可访问者
+ *  (成员行 / 组授予,最高者生效);两个及以上 → 'ambiguous'(调用方 403);零个 → null(调用方 404 / 走建站)。
+ *  slug 唯一性是 per 站长的(sites_handle_slug_uq),非站长解析因此需要此规则。
+ *  open 模式的「已登录基线」不动控制台:无行者照旧解析不出 = v0.3.0 的 404(W4 才按 members 模式收窄),
+ *  所以 member/grant 角色等级(mode 无关)即控制台闸门。 */
+async function resolveSite(
+  db: Db,
+  userId: string,
+  slug: string,
+): Promise<{ site: SiteRow; role: SiteRole } | 'ambiguous' | null> {
+  const own = await ownedSite(db, userId, slug);
+  if (own) return { site: own, role: 'owner' };
+  const candidates = await db
+    .select()
+    .from(sites)
+    .where(and(eq(sites.slug, slug), isNull(sites.deletedAt)));
+  if (candidates.length === 0) return null;
+  const groups = (
+    await db
+      .select({ name: userGroups.groupName })
+      .from(userGroups)
+      .where(eq(userGroups.userId, userId))
+  ).map((g) => g.name);
+  const matches: { site: SiteRow; role: SiteRole }[] = [];
+  for (const site of candidates) {
+    const member =
+      (
+        await db
+          .select({ role: siteMembers.role })
+          .from(siteMembers)
+          .where(and(eq(siteMembers.siteId, site.id), eq(siteMembers.userId, userId)))
+      )[0] ?? null;
+    let grantRole: SiteRole | null = null;
+    if (groups.length > 0) {
+      const grants = await db
+        .select({ role: groupGrants.role })
+        .from(groupGrants)
+        .where(and(eq(groupGrants.siteId, site.id), inArray(groupGrants.groupName, groups)));
+      for (const g of grants) {
+        if (grantRole === null || ROLE_RANK[g.role] > ROLE_RANK[grantRole]) grantRole = g.role;
+      }
+    }
+    // mode 只并集能力面、不影响派生角色;W3 固定 open,W4 换真实实例模式。
+    const access = resolveSiteAccess({
+      isOwner: false,
+      memberRole: member === null ? null : member.role,
+      grantRole,
+      mode: 'open',
+    });
+    if (access.role !== null) matches.push({ site, role: access.role });
+  }
+  if (matches.length === 0) return null;
+  if (matches.length > 1) return 'ambiguous';
+  return matches[0] ?? null;
+}
+
+/** 解析 + 最低角色闸(设计 seam 表):未解析 → 404(不泄露站点存在性);歧义 → 403;角色不足 → 403。 */
+async function requireRole(
+  c: Context<AppEnv>,
+  db: Db,
+  userId: string,
+  slug: string,
+  min: SiteRole,
+): Promise<{ site: SiteRow; role: SiteRole } | Response> {
+  const res = await resolveSite(db, userId, slug);
+  if (res === 'ambiguous') return jsonError(c, 403, 'site.access.ambiguous');
+  if (res === null) return jsonError(c, 404, 'site.notFound');
+  if (ROLE_RANK[res.role] < ROLE_RANK[min]) return jsonError(c, 403, 'site.access.forbidden');
+  return res;
+}
+
+/** 解析后按主键回读;墓碑/软删 → null(语义对齐 ownedSite,调用方回 404)。 */
+async function siteById(db: Db, id: string): Promise<SiteRow | null> {
+  return (
+    (
+      await db
+        .select()
+        .from(sites)
+        .where(and(eq(sites.id, id), isNull(sites.deletedAt)))
+    )[0] ?? null
+  );
+}
+
+/** 草稿会话目标站点的站长行:部署配额记站长的账(设计§6,非站长部署)。 */
+async function siteOwnerOf(db: Db, siteId: string): Promise<UserRow> {
+  const site = (await db.select().from(sites).where(eq(sites.id, siteId)))[0]!;
+  return (await db.select().from(users).where(eq(users.id, site.ownerId)))[0]!;
+}
+
+/** 定位站点下的一条线程(跨站 / 已删 / 不属于该站 → null,调用方回 404)。 */
+async function threadOfSite(db: Db, site: SiteRow, threadId: string) {
+  const thread =
+    (await db.select().from(commentThreads).where(eq(commentThreads.id, threadId)))[0] ?? null;
+  if (!thread || thread.deletedAt !== null || thread.siteId !== site.id) return null;
+  return thread;
 }
 
 async function readJson<T>(c: Context<AppEnv>): Promise<T | null> {
@@ -453,7 +565,16 @@ export function makeSiteRoutes(deps: AppDeps, mw: AuthMiddleware): Hono<AppEnv> 
         .groupBy(commentThreads.siteId);
       for (const g of grouped) counts.set(g.siteId, g.n);
     }
-    return c.json({ sites: rows.map((x) => siteOut(deps, x, counts.get(x.id) ?? 0)) });
+    return c.json({
+      sites: rows.map((x) => siteOut(deps, x, counts.get(x.id) ?? 0, 'owner')),
+    });
+  });
+
+  // ---- 单站读取(W3 新增):站点状态 + your_role;最低 viewer,无行者 404(与 v0.3.0 控制台口径一致) ----
+  r.get('/:slug', mw.currentUser, async (c) => {
+    const acl = await requireRole(c, db, c.get('user').id, c.req.param('slug'), 'viewer');
+    if (acl instanceof Response) return acl;
+    return c.json(siteOut(deps, acl.site, await unresolvedCount(db, acl.site.id), acl.role));
   });
 
   // ---- 部署(单请求 multipart;小站点一行 curl 即可。>~90MB 的大站点走分批 /deploys) ----
@@ -481,10 +602,21 @@ export function makeSiteRoutes(deps: AppDeps, mw: AuthMiddleware): Hono<AppEnv> 
     if (totalBytes > cfg.maxSiteMb * 1024 * 1024) {
       return jsonError(c, 413, 'site.size.exceeded', { mb: cfg.maxSiteMb });
     }
-    const quotaErr = await quotaCheck(c, db, cfg, user, slug, totalBytes);
+    const acl = await resolveSite(db, user.id, slug);
+    if (acl === 'ambiguous') return jsonError(c, 403, 'site.access.ambiguous');
+    if (acl && ROLE_RANK[acl.role] < ROLE_RANK.editor) {
+      return jsonError(c, 403, 'site.access.forbidden');
+    }
+    // 配额记「目标站点站长」的账:editor 部署扣站长额度(设计§6),本人路径主体不变。
+    const quotaUser: UserRow = acl
+      ? (await db.select().from(users).where(eq(users.id, acl.site.ownerId)))[0]!
+      : user;
+    const quotaErr = await quotaCheck(c, db, cfg, quotaUser, slug, totalBytes);
     if (quotaErr) return quotaErr;
 
-    const site = await getOrCreateSite(db, user, handle, slug, title);
+    // 无可访问站点 → 本人建站路径照旧(owner-only:新站点恒属发起人,成员不影建)。
+    const site = acl ? acl.site : await getOrCreateSite(db, user, handle, slug, title);
+    const role: SiteRole = acl ? acl.role : 'owner';
     const vid = uuid();
     const storagePrefix = `sites/${site.ownerId}/${slug}/${vid}/`;
     for (const e of batch) {
@@ -507,11 +639,11 @@ export function makeSiteRoutes(deps: AppDeps, mw: AuthMiddleware): Hono<AppEnv> 
       `deploy handle=${handle} slug=${slug} vid=${vid} files=${manifest.length} bytes=${totalBytes} ` +
         `user=${user.id} via=${c.get('authVia')} ip=${clientIp(c)} ua=${JSON.stringify(c.req.header('user-agent') ?? '-')}`,
     );
-    const updated = await ownedSite(db, user.id, slug);
+    const updated = await siteById(db, site.id);
     if (!updated) return jsonError(c, 404, 'site.notFound');
     // pruned_versions:本次发布因版本上限被回收的旧版本数(>0 → 前端提示)
     return c.json({
-      ...siteOut(deps, updated, await unresolvedCount(db, updated.id)),
+      ...siteOut(deps, updated, await unresolvedCount(db, updated.id), role),
       pruned_versions: pruned,
     });
   });
@@ -533,7 +665,13 @@ export function makeSiteRoutes(deps: AppDeps, mw: AuthMiddleware): Hono<AppEnv> 
 
     await sweepExpiredSessions(db, storage, user.id); // 顺手回收本人过期草稿
 
-    const site = await getOrCreateSite(db, user, handle, slug, title);
+    const acl = await resolveSite(db, user.id, slug);
+    if (acl === 'ambiguous') return jsonError(c, 403, 'site.access.ambiguous');
+    if (acl && ROLE_RANK[acl.role] < ROLE_RANK.editor) {
+      return jsonError(c, 403, 'site.access.forbidden');
+    }
+    // 无可访问站点 → 本人建站路径照旧;editor 开草稿指向解析出的站点(不影建)。
+    const site = acl ? acl.site : await getOrCreateSite(db, user, handle, slug, title);
     const vid = uuid();
     const now = nowIso();
     const session: DeploySessionRow = {
@@ -566,6 +704,9 @@ export function makeSiteRoutes(deps: AppDeps, mw: AuthMiddleware): Hono<AppEnv> 
     const user = c.get('user');
     const session = await ownedSession(db, user.id, c.req.param('slug'), c.req.param('deployId'));
     if (!session) return jsonError(c, 404, 'site.deploy.session.notFound');
+    // 部署族最低 editor(设计 seam 表):角色被中途撤销时,批次/commit/撤销即刻失效。
+    const acl = await requireRole(c, db, user.id, c.req.param('slug'), 'editor');
+    if (acl instanceof Response) return acl;
 
     const form = await collectDeployForm(c);
     if (form instanceof Response) return form;
@@ -581,7 +722,14 @@ export function makeSiteRoutes(deps: AppDeps, mw: AuthMiddleware): Hono<AppEnv> 
     if (mergedBytes > cfg.maxSiteMb * 1024 * 1024) {
       return jsonError(c, 413, 'site.size.exceeded', { mb: cfg.maxSiteMb });
     }
-    const quotaErr = await quotaCheck(c, db, cfg, user, session.slug, mergedBytes);
+    const quotaErr = await quotaCheck(
+      c,
+      db,
+      cfg,
+      await siteOwnerOf(db, session.siteId),
+      session.slug,
+      mergedBytes,
+    );
     if (quotaErr) return quotaErr;
 
     for (const e of batch) {
@@ -601,6 +749,8 @@ export function makeSiteRoutes(deps: AppDeps, mw: AuthMiddleware): Hono<AppEnv> 
     const user = c.get('user');
     const session = await ownedSession(db, user.id, c.req.param('slug'), c.req.param('deployId'));
     if (!session) return jsonError(c, 404, 'site.deploy.session.notFound');
+    const acl = await requireRole(c, db, user.id, c.req.param('slug'), 'editor');
+    if (acl instanceof Response) return acl;
     if (session.manifest.length === 0) return jsonError(c, 422, 'site.deploy.noFiles');
 
     const body = await readJson<{ title?: unknown }>(c);
@@ -612,7 +762,14 @@ export function makeSiteRoutes(deps: AppDeps, mw: AuthMiddleware): Hono<AppEnv> 
     if (totalBytes > cfg.maxSiteMb * 1024 * 1024) {
       return jsonError(c, 413, 'site.size.exceeded', { mb: cfg.maxSiteMb });
     }
-    const quotaErr = await quotaCheck(c, db, cfg, user, session.slug, totalBytes);
+    const quotaErr = await quotaCheck(
+      c,
+      db,
+      cfg,
+      await siteOwnerOf(db, session.siteId),
+      session.slug,
+      totalBytes,
+    );
     if (quotaErr) return quotaErr;
 
     await generateIndexFallback(
@@ -638,10 +795,10 @@ export function makeSiteRoutes(deps: AppDeps, mw: AuthMiddleware): Hono<AppEnv> 
         `files=${session.manifest.length} bytes=${totalBytes} user=${user.id} via=${c.get('authVia')} ` +
         `ip=${clientIp(c)} ua=${JSON.stringify(c.req.header('user-agent') ?? '-')}`,
     );
-    const updated = await ownedSite(db, user.id, session.slug);
+    const updated = await siteById(db, session.siteId);
     if (!updated) return jsonError(c, 404, 'site.notFound');
     return c.json({
-      ...siteOut(deps, updated, await unresolvedCount(db, updated.id)),
+      ...siteOut(deps, updated, await unresolvedCount(db, updated.id), acl.role),
       pruned_versions: pruned,
     });
   });
@@ -653,6 +810,8 @@ export function makeSiteRoutes(deps: AppDeps, mw: AuthMiddleware): Hono<AppEnv> 
     const user = c.get('user');
     const session = await ownedSession(db, user.id, c.req.param('slug'), c.req.param('deployId'));
     if (!session) return jsonError(c, 404, 'site.deploy.session.notFound');
+    const acl = await requireRole(c, db, user.id, c.req.param('slug'), 'editor');
+    if (acl instanceof Response) return acl;
     if (storage.deletePrefix) {
       try {
         await storage.deletePrefix(session.storagePrefix);
@@ -671,8 +830,9 @@ export function makeSiteRoutes(deps: AppDeps, mw: AuthMiddleware): Hono<AppEnv> 
     const body = await readJson<SitePatchBody>(c);
     if (body === null) return jsonError(c, 422, 'request.body.malformed');
 
-    const site = await ownedSite(db, user.id, slug);
-    if (!site) return jsonError(c, 404, 'site.notFound');
+    const acl = await requireRole(c, db, user.id, slug, 'owner');
+    if (acl instanceof Response) return acl;
+    const { site } = acl;
 
     const set: Partial<typeof sites.$inferInsert> = {};
     // 永久公开:publicExpiresAt=null(与 public_hours 互斥,forever 优先且不受 publicMaxHours 约束)。
@@ -729,9 +889,9 @@ export function makeSiteRoutes(deps: AppDeps, mw: AuthMiddleware): Hono<AppEnv> 
     set.updatedAt = nowIso();
     await db.update(sites).set(set).where(eq(sites.id, site.id));
 
-    const updated = await ownedSite(db, user.id, slug);
+    const updated = await siteById(db, site.id);
     if (!updated) return jsonError(c, 404, 'site.notFound');
-    return c.json(siteOut(deps, updated, await unresolvedCount(db, updated.id)));
+    return c.json(siteOut(deps, updated, await unresolvedCount(db, updated.id), acl.role));
   });
 
   // ---- 分享链接:无账号者凭链接可看(guest_comments 开着还可评论) ----
@@ -757,8 +917,9 @@ export function makeSiteRoutes(deps: AppDeps, mw: AuthMiddleware): Hono<AppEnv> 
         return jsonError(c, 422, 'site.shareLabel.tooLong', { max: MAX_SHARE_LABEL });
       }
     }
-    const site = await ownedSite(db, user.id, c.req.param('slug'));
-    if (!site) return jsonError(c, 404, 'site.notFound');
+    const acl = await requireRole(c, db, user.id, c.req.param('slug'), 'owner');
+    if (acl instanceof Response) return acl;
+    const site = acl.site;
     const expiresAt =
       hours === null ? null : new Date(Date.now() + hours * 3600 * 1000).toISOString();
     const code = shortId(10);
@@ -783,8 +944,9 @@ export function makeSiteRoutes(deps: AppDeps, mw: AuthMiddleware): Hono<AppEnv> 
   // ---- 分享链接列表(未撤销的;expires_at 过线的仍列出,由调用方标注「已过期」) ----
   r.get('/:slug/share-links', mw.currentUser, async (c) => {
     const user = c.get('user');
-    const site = await ownedSite(db, user.id, c.req.param('slug'));
-    if (!site) return jsonError(c, 404, 'site.notFound');
+    const acl = await requireRole(c, db, user.id, c.req.param('slug'), 'owner');
+    if (acl instanceof Response) return acl;
+    const site = acl.site;
     const rows = await db
       .select()
       .from(shareLinks)
@@ -804,8 +966,9 @@ export function makeSiteRoutes(deps: AppDeps, mw: AuthMiddleware): Hono<AppEnv> 
   // ---- 单条撤销:该链接的新兑换与已进来的浏览器会话(内嵌 lnk)一并即拒 ----
   r.delete('/:slug/share-links/:code', mw.mutatingUser, async (c) => {
     const user = c.get('user');
-    const site = await ownedSite(db, user.id, c.req.param('slug'));
-    if (!site) return jsonError(c, 404, 'site.notFound');
+    const acl = await requireRole(c, db, user.id, c.req.param('slug'), 'owner');
+    if (acl instanceof Response) return acl;
+    const site = acl.site;
     const code = c.req.param('code');
     const link = (await db.select().from(shareLinks).where(eq(shareLinks.id, code)))[0];
     if (!link || link.siteId !== site.id || link.revokedAt !== null) {
@@ -818,8 +981,9 @@ export function makeSiteRoutes(deps: AppDeps, mw: AuthMiddleware): Hono<AppEnv> 
   // ---- 撤销全部分享链接:skv 自增(短码/旧 JWT 的所有访客会话零查库即拒)+ 批量 revoke 短码行 ----
   r.delete('/:slug/share-link', mw.mutatingUser, async (c) => {
     const user = c.get('user');
-    const site = await ownedSite(db, user.id, c.req.param('slug'));
-    if (!site) return jsonError(c, 404, 'site.notFound');
+    const acl = await requireRole(c, db, user.id, c.req.param('slug'), 'owner');
+    if (acl instanceof Response) return acl;
+    const site = acl.site;
     await db
       .update(sites)
       .set({ shareKeyVersion: site.shareKeyVersion + 1, updatedAt: nowIso() })
@@ -834,14 +998,18 @@ export function makeSiteRoutes(deps: AppDeps, mw: AuthMiddleware): Hono<AppEnv> 
   // ---- 软删(同名 slug 可复用) ----
   r.delete('/:slug', mw.mutatingUser, async (c) => {
     const user = c.get('user');
-    const site = await ownedSite(db, user.id, c.req.param('slug'));
-    if (!site) return jsonError(c, 404, 'site.notFound');
+    const acl = await requireRole(c, db, user.id, c.req.param('slug'), 'owner');
+    if (acl instanceof Response) return acl;
+    const site = acl.site;
     const now = nowIso();
     // 软删:同时把 slug 改成墓碑名,让出活命名空间 → 普通唯一索引下同名 slug 可复用(跨方言通用)。
     await db
       .update(sites)
       .set({ deletedAt: now, updatedAt: now, slug: tombstoneSlug(site.slug, site.id) })
       .where(eq(sites.id, site.id));
+    // 软删同时清剪成员与组授予(设计§6):墓碑站点不留任何访问权。
+    await db.delete(siteMembers).where(eq(siteMembers.siteId, site.id));
+    await db.delete(groupGrants).where(eq(groupGrants.siteId, site.id));
     // 软删后回收存储(尽力而为;同名 slug 复用是新建,不与已删行的 storage 冲突)。
     // 版本前缀是真相源,逐个回收 —— 从试用站 claim 来的站点,对象仍留在原 sites/trial/ 前缀下,
     // 只按 (ownerId, slug) 推算会漏删;canonical 前缀再兜一次底(pruned 版本残留等)。
@@ -861,8 +1029,9 @@ export function makeSiteRoutes(deps: AppDeps, mw: AuthMiddleware): Hono<AppEnv> 
   // ---- 评论导出(AI 闭环入口,PAT 可访问):改页面前先拉未解决意见 ----
   r.get('/:slug/comments', mw.currentUser, async (c) => {
     const user = c.get('user');
-    const site = await ownedSite(db, user.id, c.req.param('slug'));
-    if (!site) return jsonError(c, 404, 'site.notFound');
+    const acl = await requireRole(c, db, user.id, c.req.param('slug'), 'viewer');
+    if (acl instanceof Response) return acl;
+    const site = acl.site;
     const all = boolQuery(c.req.query('all'));
 
     const conds = [eq(commentThreads.siteId, site.id), isNull(commentThreads.deletedAt)];
@@ -901,19 +1070,7 @@ export function makeSiteRoutes(deps: AppDeps, mw: AuthMiddleware): Hono<AppEnv> 
     });
   });
 
-  /** 定位本人站点下的某条评论(跨站 / 已删 / 不属于该站 → null,调用方回 404)。 */
-  async function ownedThread(userId: string, slug: string, threadId: string) {
-    const site = await ownedSite(db, userId, slug);
-    if (!site) return { site: null, thread: null };
-    const thread =
-      (await db.select().from(commentThreads).where(eq(commentThreads.id, threadId)))[0] ?? null;
-    if (!thread || thread.deletedAt !== null || thread.siteId !== site.id) {
-      return { site, thread: null };
-    }
-    return { site, thread };
-  }
-
-  // ---- 标记已解决 / 重开(PAT 可调,AI 处理完意见后闭环) ----
+  // ---- 标记已解决 / 重开(PAT 可调,AI 处理完意见后闭环);seam 表最低 editor ----
   r.patch('/:slug/comments/:tid', mw.mutatingUser, async (c) => {
     const scopeErr = requireScope(c, 'comment');
     if (scopeErr) return scopeErr;
@@ -922,8 +1079,9 @@ export function makeSiteRoutes(deps: AppDeps, mw: AuthMiddleware): Hono<AppEnv> 
     if (body === null || typeof body.resolved !== 'boolean') {
       return jsonError(c, 422, 'comment.resolved.notBool');
     }
-    const { site, thread } = await ownedThread(user.id, c.req.param('slug'), c.req.param('tid'));
-    if (!site) return jsonError(c, 404, 'site.notFound');
+    const acl = await requireRole(c, db, user.id, c.req.param('slug'), 'editor');
+    if (acl instanceof Response) return acl;
+    const thread = await threadOfSite(db, acl.site, c.req.param('tid'));
     if (!thread) return jsonError(c, 404, 'comment.notFound');
     await db
       .update(commentThreads)
@@ -932,15 +1090,16 @@ export function makeSiteRoutes(deps: AppDeps, mw: AuthMiddleware): Hono<AppEnv> 
     return c.json({ id: thread.id, resolved: body.resolved });
   });
 
-  // ---- 给评论留言(PAT 可调,AI 说明「已按 X 修改」) ----
+  // ---- 给评论留言(PAT 可调,AI 说明「已按 X 修改」);seam 表最低 commenter ----
   r.post('/:slug/comments/:tid/replies', mw.mutatingUser, async (c) => {
     const scopeErr = requireScope(c, 'comment');
     if (scopeErr) return scopeErr;
     const user = c.get('user');
     const body = await readJson<{ text?: unknown }>(c);
     if (body === null) return jsonError(c, 422, 'request.body.malformed');
-    const { site, thread } = await ownedThread(user.id, c.req.param('slug'), c.req.param('tid'));
-    if (!site) return jsonError(c, 404, 'site.notFound');
+    const acl = await requireRole(c, db, user.id, c.req.param('slug'), 'commenter');
+    if (acl instanceof Response) return acl;
+    const thread = await threadOfSite(db, acl.site, c.req.param('tid'));
     if (!thread) return jsonError(c, 404, 'comment.notFound');
 
     const text = typeof body.text === 'string' ? body.text.trim() : '';
@@ -982,8 +1141,9 @@ export function makeSiteRoutes(deps: AppDeps, mw: AuthMiddleware): Hono<AppEnv> 
   // ---- 版本列表(created_at 倒序) ----
   r.get('/:slug/versions', mw.currentUser, async (c) => {
     const user = c.get('user');
-    const site = await ownedSite(db, user.id, c.req.param('slug'));
-    if (!site) return jsonError(c, 404, 'site.notFound');
+    const acl = await requireRole(c, db, user.id, c.req.param('slug'), 'viewer');
+    if (acl instanceof Response) return acl;
+    const site = acl.site;
     const versions = [...site.versions].sort((a, b) => b.created_at.localeCompare(a.created_at));
     return c.json({
       current: site.currentVersionId,
@@ -1006,8 +1166,9 @@ export function makeSiteRoutes(deps: AppDeps, mw: AuthMiddleware): Hono<AppEnv> 
       return jsonError(c, 422, 'site.version.missingId');
     }
     const versionId = body.version_id;
-    const site = await ownedSite(db, user.id, c.req.param('slug'));
-    if (!site) return jsonError(c, 404, 'site.notFound');
+    const acl = await requireRole(c, db, user.id, c.req.param('slug'), 'editor');
+    if (acl instanceof Response) return acl;
+    const site = acl.site;
     if (!site.versions.some((v) => v.id === versionId)) {
       return jsonError(c, 404, 'site.version.notFound');
     }
@@ -1015,9 +1176,172 @@ export function makeSiteRoutes(deps: AppDeps, mw: AuthMiddleware): Hono<AppEnv> 
       .update(sites)
       .set({ currentVersionId: versionId, updatedAt: nowIso() })
       .where(eq(sites.id, site.id));
-    const updated = await ownedSite(db, user.id, c.req.param('slug'));
+    const updated = await siteById(db, site.id);
     if (!updated) return jsonError(c, 404, 'site.notFound');
-    return c.json(siteOut(deps, updated, await unresolvedCount(db, updated.id)));
+    return c.json(siteOut(deps, updated, await unresolvedCount(db, updated.id), acl.role));
+  });
+
+  // ---- 成员管理(owner-only,设计§6):按 handle(公共身份)加成员;一 (site,user) 一行,改角色原地 UPDATE ----
+  r.get('/:slug/members', mw.currentUser, async (c) => {
+    const acl = await requireRole(c, db, c.get('user').id, c.req.param('slug'), 'owner');
+    if (acl instanceof Response) return acl;
+    const rows = await db
+      .select({
+        id: siteMembers.id,
+        userId: siteMembers.userId,
+        role: siteMembers.role,
+        createdAt: siteMembers.createdAt,
+        handle: users.handle,
+      })
+      .from(siteMembers)
+      .innerJoin(users, eq(siteMembers.userId, users.id))
+      .where(eq(siteMembers.siteId, acl.site.id))
+      .orderBy(asc(siteMembers.createdAt));
+    return c.json({
+      members: rows.map((m) => ({
+        id: m.id,
+        user_id: m.userId,
+        handle: m.handle,
+        role: m.role,
+        created_at: m.createdAt,
+      })),
+    });
+  });
+
+  r.put('/:slug/members', mw.mutatingUser, async (c) => {
+    const user = c.get('user');
+    const acl = await requireRole(c, db, user.id, c.req.param('slug'), 'owner');
+    if (acl instanceof Response) return acl;
+    const body = await readJson<{ handle?: unknown; role?: unknown }>(c);
+    if (body === null) return jsonError(c, 422, 'request.body.malformed');
+    const role = body.role;
+    if (!grantableRole(role)) return jsonError(c, 422, 'site.members.roleInvalid');
+    // handle 即 URL 路径身份,精确匹配;缺失/类型错/查无 → 同一 404 口径(不新增搜索端点,设计§6)
+    const target =
+      typeof body.handle === 'string'
+        ? ((await db.select().from(users).where(eq(users.handle, body.handle)))[0] ?? null)
+        : null;
+    if (!target) return jsonError(c, 404, 'site.members.handleNotFound');
+    const existing =
+      (
+        await db
+          .select()
+          .from(siteMembers)
+          .where(and(eq(siteMembers.siteId, acl.site.id), eq(siteMembers.userId, target.id)))
+      )[0] ?? null;
+    if (existing) {
+      await db.update(siteMembers).set({ role }).where(eq(siteMembers.id, existing.id));
+    } else {
+      await db.insert(siteMembers).values({
+        id: uuid(),
+        siteId: acl.site.id,
+        userId: target.id,
+        role,
+        createdAt: nowIso(),
+      });
+    }
+    const saved = (
+      await db
+        .select()
+        .from(siteMembers)
+        .where(and(eq(siteMembers.siteId, acl.site.id), eq(siteMembers.userId, target.id)))
+    )[0]!;
+    return c.json({
+      id: saved.id,
+      user_id: saved.userId,
+      handle: target.handle,
+      role: saved.role,
+      created_at: saved.createdAt,
+    });
+  });
+
+  r.delete('/:slug/members/:id', mw.mutatingUser, async (c) => {
+    const acl = await requireRole(c, db, c.get('user').id, c.req.param('slug'), 'owner');
+    if (acl instanceof Response) return acl;
+    const member =
+      (
+        await db
+          .select()
+          .from(siteMembers)
+          .where(and(eq(siteMembers.id, c.req.param('id')), eq(siteMembers.siteId, acl.site.id)))
+      )[0] ?? null;
+    if (!member) return jsonError(c, 404, 'site.members.notFound');
+    await db.delete(siteMembers).where(eq(siteMembers.id, member.id));
+    return c.json({ ok: true });
+  });
+
+  // ---- 组授予管理(owner-only,设计§6):经 user_groups 精确匹配生效(摄入在 W5);角色写侧即封顶 editor ----
+  r.get('/:slug/group-grants', mw.currentUser, async (c) => {
+    const acl = await requireRole(c, db, c.get('user').id, c.req.param('slug'), 'owner');
+    if (acl instanceof Response) return acl;
+    const rows = await db
+      .select()
+      .from(groupGrants)
+      .where(eq(groupGrants.siteId, acl.site.id))
+      .orderBy(asc(groupGrants.createdAt));
+    return c.json({
+      grants: rows.map((g) => ({
+        id: g.id,
+        group_name: g.groupName,
+        role: g.role,
+        created_at: g.createdAt,
+      })),
+    });
+  });
+
+  r.put('/:slug/group-grants', mw.mutatingUser, async (c) => {
+    const user = c.get('user');
+    const acl = await requireRole(c, db, user.id, c.req.param('slug'), 'owner');
+    if (acl instanceof Response) return acl;
+    const body = await readJson<{ group_name?: unknown; role?: unknown }>(c);
+    if (body === null) return jsonError(c, 422, 'request.body.malformed');
+    const groupName = typeof body.group_name === 'string' ? body.group_name.trim() : '';
+    if (!groupName) return jsonError(c, 422, 'site.grants.groupNameEmpty');
+    const role = body.role;
+    if (!grantableRole(role)) return jsonError(c, 422, 'site.grants.roleInvalid');
+    // 一 (site,group) 一行:改授予角色 = 原地 UPDATE(与成员同一模式)
+    const existing =
+      (
+        await db
+          .select()
+          .from(groupGrants)
+          .where(and(eq(groupGrants.siteId, acl.site.id), eq(groupGrants.groupName, groupName)))
+      )[0] ?? null;
+    if (existing) {
+      await db.update(groupGrants).set({ role }).where(eq(groupGrants.id, existing.id));
+      return c.json({
+        id: existing.id,
+        group_name: groupName,
+        role,
+        created_at: existing.createdAt,
+      });
+    }
+    const id = uuid();
+    const createdAt = nowIso();
+    await db.insert(groupGrants).values({
+      id,
+      siteId: acl.site.id,
+      groupName,
+      role,
+      createdBy: user.id,
+      createdAt,
+    });
+    return c.json({ id, group_name: groupName, role, created_at: createdAt });
+  });
+
+  r.delete('/:slug/group-grants/:id', mw.mutatingUser, async (c) => {
+    const acl = await requireRole(c, db, c.get('user').id, c.req.param('slug'), 'owner');
+    if (acl instanceof Response) return acl;
+    const grant =
+      (
+        await db
+          .select()
+          .from(groupGrants)
+          .where(and(eq(groupGrants.id, c.req.param('id')), eq(groupGrants.siteId, acl.site.id)))
+      )[0] ?? null;
+    if (!grant) return jsonError(c, 404, 'site.grants.notFound');
+    await db.delete(groupGrants).where(eq(groupGrants.id, grant.id));
+    return c.json({ ok: true });
   });
 
   return r;
