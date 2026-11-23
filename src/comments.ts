@@ -26,8 +26,11 @@ import type { CommentThreadRow, SiteRow, ThreadComment, UserRow } from './db/ind
 import { users } from './db/index.js';
 import { errorBody, t, type Locale, type TParams } from './i18n/index.js';
 import { localeOf } from './i18n/locale.js';
+import { effectiveSiteAccessMode } from './instance-settings.js';
 import type { AppDeps, AppEnv } from './types.js';
 import { normalizeSitePath, nowIso, shortId } from './util.js';
+import type { SiteRole } from './rbac.js';
+import { roleAtLeast, roleOnSite } from './site-access.js';
 
 import { requireScope } from './api/deps.js';
 
@@ -278,12 +281,13 @@ export function makeCommentRoutes(deps: AppDeps): Hono<AppEnv> {
   }
 
   /** (handle, slug) 路由的评论者解析。时序保持与旧版一致:
-   *  登录用户 → 站点 404/评论关闭 403;裸匿名(含无效访客会话)一律 401,不泄露站点存在性。 */
+   *  登录用户 → 站点 404/评论关闭 403;裸匿名(含无效访客会话)一律 401,不泄露站点存在性。
+   *  W4: in members mode, logged-in users also pass the content-plane minimum (viewer+); guests unchanged. */
   async function resolveCommenter(
     c: Context<AppEnv>,
     handle: string,
     slug: string,
-  ): Promise<{ who: Commenter; site: SiteRow }> {
+  ): Promise<{ who: Commenter; site: SiteRow; membersMode: boolean; role: SiteRole | null }> {
     const s = await sessionCommenter(c);
     if (s) {
       const site = await loadSite(handle, slug);
@@ -292,12 +296,18 @@ export function makeCommentRoutes(deps: AppDeps): Hono<AppEnv> {
       if (site.suspendedAt !== null || !site.commentsEnabled) {
         throw new ApiError(403, 'comment.site.disabled');
       }
-      return { who: s.who, site };
+      if ((await effectiveSiteAccessMode(deps)) === 'members') {
+        // W4: GET threads minimum is viewer+; write routes raise to commenter+ in their handlers.
+        const role = await roleOnSite(db, s.user.id, site);
+        if (!roleAtLeast(role, 'viewer')) throw new ApiError(403, 'site.access.forbidden');
+        return { who: s.who, site, membersMode: true, role };
+      }
+      return { who: s.who, site, membersMode: false, role: null };
     }
     const site = await loadSite(handle, slug);
     if (site) {
       const guest = await guestOn(c, site);
-      if (guest) return { who: guest, site };
+      if (guest) return { who: guest, site, membersMode: false, role: null };
     }
     throw new ApiError(401, 'auth.unauthenticated');
   }
@@ -412,7 +422,12 @@ export function makeCommentRoutes(deps: AppDeps): Hono<AppEnv> {
       const body = parseThreadCreate(await readJson(c));
       const handle = c.req.param('handle') ?? '';
       const slug = c.req.param('slug') ?? '';
-      const { who, site } = await resolveCommenter(c, handle, slug);
+      const { who, site, membersMode, role } = await resolveCommenter(c, handle, slug);
+      if (membersMode && !roleAtLeast(role, 'commenter')) {
+        // W4: thread create minimum is commenter+; guests still follow the guestComments rules
+        // (this gate only runs on the logged-in branch of resolveCommenter).
+        throw new ApiError(403, 'site.access.forbidden');
+      }
       if (who.guest) await guestWriteLimit(c, site.id, who.sub);
       const rel = normalizeSitePath(body.path);
       if (rel === null) throw new ApiError(422, 'site.path.invalid');
@@ -469,6 +484,15 @@ export function makeCommentRoutes(deps: AppDeps): Hono<AppEnv> {
       }
       const body = raw as { text: string; author_name?: unknown };
       const { who, thread } = await resolveThreadCommenter(c, c.req.param('tid') ?? '');
+      if (!who.guest) {
+        // W4: replies is a thread route — select the site row by thread.siteId, then in members
+        // mode apply the commenter minimum.
+        const site = (await db.select().from(sites).where(eq(sites.id, thread.siteId)))[0];
+        if (site && (await effectiveSiteAccessMode(deps)) === 'members') {
+          const role = await roleOnSite(db, who.sub, site);
+          if (!roleAtLeast(role, 'commenter')) throw new ApiError(403, 'site.access.forbidden');
+        }
+      }
       if (who.guest) await guestWriteLimit(c, thread.siteId, who.sub);
       const rawName = typeof body.author_name === 'string' ? body.author_name : null;
       const reply: ThreadComment = {
@@ -514,8 +538,14 @@ export function makeCommentRoutes(deps: AppDeps): Hono<AppEnv> {
         set.kind = k as string | null;
       }
       // 解决/重开/改 kind 放开给所有登录成员(协作场景,留痕在回复里)
-      await viewer(c);
+      // W4: in members mode this narrows to editor+. Anonymous still gets 401; guests never reach here.
+      const who = await viewer(c);
       const thread = await getThread(c.req.param('tid') ?? '');
+      const site = (await db.select().from(sites).where(eq(sites.id, thread.siteId)))[0];
+      if (site && (await effectiveSiteAccessMode(deps)) === 'members') {
+        const role = await roleOnSite(db, who.sub, site);
+        if (!roleAtLeast(role, 'editor')) throw new ApiError(403, 'site.access.forbidden');
+      }
       await db.update(commentThreads).set(set).where(eq(commentThreads.id, thread.id));
       const updated: CommentThreadRow = {
         ...thread,

@@ -91,6 +91,7 @@ All configuration is via environment variables. The most common settings are bel
 | `PAGEPIN_BASE_URL` | `http://localhost:8000` | Public URL of the instance (single-domain mode). |
 | `PAGEPIN_ADMIN_EMAIL` / `…_PASSWORD` | — | Set both to upsert an admin at startup; otherwise the first signup becomes admin. |
 | `PAGEPIN_AUTH_MODE` | `password` | `password`, `oidc`, or `none` (dev only: auto-login as an admin). |
+| `PAGEPIN_SITE_ACCESS_MODE` | `open` | `open` or `members` (when set, locks the console UI). With `members`, private sites serve site members only. A signed-in non-member gets a 403 page. Share links and public windows stay open. |
 | `PAGEPIN_DEFAULT_LOCALE` | `en` | Fallback UI/API language (`en` or `zh`). Per request, `?lang=` → `pp_lang` cookie → `Accept-Language` override it. |
 | `PAGEPIN_STORAGE` | `fs` | `fs` (local disk) or `s3` (S3-compatible). |
 

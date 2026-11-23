@@ -15,9 +15,11 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { eq } from 'drizzle-orm';
 
 import { Hono } from 'hono';
 
+import { makeAdminRoutes } from '../src/api/admin.js';
 import { makeAuthMiddleware } from '../src/api/deps.js';
 import { makeSiteRoutes } from '../src/api/sites.js';
 import { mint } from '../src/auth/sessions.js';
@@ -169,6 +171,14 @@ async function setup(env: Record<string, string> = {}) {
       displayName: 'Zoe',
       createdAt: nowIso(),
     },
+    {
+      id: 'u-admin',
+      email: 'admin@example.com',
+      handle: 'admin',
+      displayName: 'Admin',
+      isAdmin: true,
+      createdAt: nowIso(),
+    },
   ]);
   const demoId = await seedSite(db, storage, 'demo');
   const otherId = await seedSite(db, storage, 'other');
@@ -180,6 +190,7 @@ async function setup(env: Record<string, string> = {}) {
   const deps: AppDeps = { config: cfg, db, storage };
   const app = new Hono<AppEnv>();
   app.route('/', makeSiteRoutes(deps, makeAuthMiddleware(deps)));
+  app.route('/', makeAdminRoutes(deps, makeAuthMiddleware(deps)));
   app.route('/', makeCommentRoutes(deps));
   app.route('/', makeServingRoutes(deps));
   const cookie = async (id: string, handle: string) =>
@@ -198,6 +209,7 @@ async function setup(env: Record<string, string> = {}) {
     frank: await cookie('u-frank', 'frank'),
     carol: await cookie('u-carol', 'carol'),
     zoe: await cookie('u-zoe', 'zoe'),
+    admin: await cookie('u-admin', 'admin'),
   };
 }
 
@@ -674,4 +686,449 @@ test('open-mode snapshot: logged-in non-member still views, comments, and consol
     .from(sites)
     .then((rows) => rows.filter((x) => x.slug === 'demo'));
   assert.equal(live.length, 2, 'alice demo + carol demo coexist as in v0.3.0');
+});
+
+// ───────────────────────── 9. W4: members-mode serving gate (design §4/§6, D2 ruling) ─────────────────────────
+
+/** Flip the instance site access mode through the real admin write path (the flip itself stays under test). */
+async function setMode(s: { app: Hono<AppEnv>; admin: string }, mode: 'open' | 'members') {
+  const res = await api(s.app, 'PATCH', '/api/admin/settings', {
+    body: { site_access_mode: mode },
+    cookie: s.admin,
+  });
+  assert.equal(res.status, 200, `admin PATCH site_access_mode=${mode}`);
+  assert.equal(((await res.json()) as { site_access_mode: string }).site_access_mode, mode);
+}
+
+/** Content-plane page GET (single-domain /p/<owner>/<slug>/), optional cookie. */
+async function contentFetch(
+  app: Hono<AppEnv>,
+  owner: string,
+  slug: string,
+  cookie?: string,
+): Promise<Response> {
+  const headers: Record<string, string> = { accept: 'text/html' };
+  if (cookie) headers.cookie = cookie;
+  return app.fetch(new Request(`http://localhost/p/${owner}/${slug}/`, { headers }));
+}
+
+/** Mint + redeem a share link like a browser guest; returns the Set-Cookie pairs to replay. */
+async function redeemShareGuest(app: Hono<AppEnv>, ownerCookie: string): Promise<string> {
+  const share = await api(app, 'POST', '/api/sites/demo/share-link', {
+    body: {},
+    cookie: ownerCookie,
+  });
+  assert.equal(share.status, 200);
+  const code = ((await share.json()) as { code: string }).code;
+  const redeem = await app.fetch(
+    new Request(`http://localhost/p/s/${code}`, { headers: { accept: 'text/html' } }),
+  );
+  assert.equal(redeem.status, 303);
+  const pairs = redeem.headers
+    .getSetCookie()
+    .map((v) => v.split(';')[0])
+    .filter(Boolean);
+  assert.ok(pairs.length > 0, 'share session cookie set on redeem');
+  return pairs.join('; ');
+}
+
+test('members mode serving: anonymous private-site hit still gets the login wall, not the D2 page', async () => {
+  const s = await setup();
+  await setMode(s, 'members');
+  const wall = await contentFetch(s.app, 'alice', 'demo');
+  assert.equal(wall.status, 200);
+  const html = await wall.text();
+  assert.ok(html.includes('This page is private'), 'the wall variant renders');
+  assert.ok(
+    !html.includes('You do not have access'),
+    'the D2 403 variant stays away for anonymous',
+  );
+  assert.ok(!html.includes('Hello Secret'), 'no content ship to anonymous');
+});
+
+test('members mode D2: signed-in non-member gets the 403 access-denied page (slug named, wall absent)', async () => {
+  const s = await setup();
+  await setMode(s, 'members');
+  const page = await contentFetch(s.app, 'alice', 'demo', s.carol);
+  assert.equal(page.status, 403);
+  const html = await page.text();
+  assert.ok(html.includes('You do not have access to this site'), 'D2 heading renders');
+  assert.ok(
+    html.includes('<span class="mono teal">demo</span>'),
+    'slug named — no existence-hiding',
+  );
+  assert.ok(!html.includes('This page is private'), 'not the login wall');
+  assert.ok(!html.includes('Hello Secret'), 'no content bytes ship');
+  assert.ok((page.headers.get('cache-control') ?? '').includes('no-store'));
+  assert.equal(page.headers.get('x-pagepin-site'), 'alice/demo');
+});
+
+test('members mode serving: owner/editor/commenter see content with overlay; viewer member sees content without overlay', async () => {
+  const s = await setup();
+  await addMember(s.db, s.demoId, 'u-bob', 'editor');
+  await addMember(s.db, s.demoId, 'u-dan', 'commenter');
+  await addMember(s.db, s.demoId, 'u-eve', 'viewer');
+  await setMode(s, 'members');
+
+  for (const [name, cookie] of [
+    ['owner', s.alice],
+    ['editor', s.bob],
+    ['commenter', s.dan],
+  ] as const) {
+    const page = await contentFetch(s.app, 'alice', 'demo', cookie);
+    assert.equal(page.status, 200, `${name} serves`);
+    const html = await page.text();
+    assert.ok(html.includes('Hello Secret'), `${name} sees content`);
+    assert.ok(
+      html.includes('/_pagepin/comments.js'),
+      `${name} gets the overlay (commenter and up)`,
+    );
+  }
+  const viewerPage = await contentFetch(s.app, 'alice', 'demo', s.eve);
+  assert.equal(viewerPage.status, 200);
+  const viewerHtml = await viewerPage.text();
+  assert.ok(viewerHtml.includes('Hello Secret'), 'viewer member sees content');
+  assert.ok(!viewerHtml.includes('/_pagepin/comments.js'), 'viewer member gets no overlay');
+});
+
+test('members mode serving: group grants resolve on the content plane like member rows', async () => {
+  const s = await setup();
+  await addGrant(s.db, s.demoId, 'u-frank', 'eng', 'viewer');
+  await addGrant(s.db, s.demoId, 'u-zoe', 'ops', 'commenter');
+  await setMode(s, 'members');
+
+  const frankPage = await contentFetch(s.app, 'alice', 'demo', s.frank);
+  assert.equal(frankPage.status, 200, 'granted viewer serves');
+  assert.ok(
+    !(await frankPage.text()).includes('/_pagepin/comments.js'),
+    'granted viewer: no overlay',
+  );
+
+  const zoePage = await contentFetch(s.app, 'alice', 'demo', s.zoe);
+  assert.equal(zoePage.status, 200, 'granted commenter serves');
+  assert.ok((await zoePage.text()).includes('/_pagepin/comments.js'), 'granted commenter: overlay');
+});
+
+test('members mode serving: share-guest redeem still serves and injects (guestComments rules unchanged)', async () => {
+  const s = await setup();
+  await setMode(s, 'members');
+  const guestCookie = await redeemShareGuest(s.app, s.alice);
+  const page = await contentFetch(s.app, 'alice', 'demo', guestCookie);
+  assert.equal(page.status, 200, 'share-guest serves (revocable share scope, not membership)');
+  const html = await page.text();
+  assert.ok(html.includes('Hello Secret'), 'guest sees content');
+  assert.ok(html.includes('/_pagepin/comments.js'), 'guest keeps the overlay under guestComments');
+});
+
+test('members mode serving: public window serves everyone; logged-in non-member sees content but no overlay', async () => {
+  const s = await setup();
+  await addMember(s.db, s.demoId, 'u-dan', 'commenter');
+  await s.db
+    .update(sites)
+    .set({
+      visibility: 'public',
+      publicExpiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    })
+    .where(eq(sites.id, s.demoId));
+  await setMode(s, 'members');
+
+  const anon = await contentFetch(s.app, 'alice', 'demo');
+  assert.equal(anon.status, 200, 'public window: anonymous serves');
+  const anonHtml = await anon.text();
+  assert.ok(anonHtml.includes('Hello Secret'));
+  assert.ok(!anonHtml.includes('/_pagepin/comments.js'), 'anonymous public stays clean');
+
+  const carolPage = await contentFetch(s.app, 'alice', 'demo', s.carol);
+  assert.equal(carolPage.status, 200, 'public window: non-member serves');
+  const carolHtml = await carolPage.text();
+  assert.ok(carolHtml.includes('Hello Secret'));
+  assert.ok(
+    !carolHtml.includes('/_pagepin/comments.js'),
+    'non-member gets no overlay in members mode',
+  );
+
+  const danPage = await contentFetch(s.app, 'alice', 'demo', s.dan);
+  assert.ok(
+    (await danPage.text()).includes('/_pagepin/comments.js'),
+    'member commenter keeps overlay',
+  );
+});
+
+test('admin flip is live at the serving seam: same path 200 → 403 → 200', async () => {
+  const s = await setup();
+  assert.equal((await contentFetch(s.app, 'alice', 'demo', s.carol)).status, 200);
+  await setMode(s, 'members');
+  assert.equal((await contentFetch(s.app, 'alice', 'demo', s.carol)).status, 403);
+  await setMode(s, 'open');
+  assert.equal((await contentFetch(s.app, 'alice', 'demo', s.carol)).status, 200);
+});
+
+// ───────────────────────── 10. W4: thread-route content minimums (members mode) ─────────────────────────
+
+test('members mode thread routes: GET threads (viewer+): member 200, anonymous 401, non-member 403', async () => {
+  const s = await setup();
+  await addMember(s.db, s.demoId, 'u-eve', 'viewer');
+  const tid = await createThread(s.app, s.alice);
+  await setMode(s, 'members');
+
+  const list = await api(s.app, 'GET', '/api/comments/alice/demo?path=index.html', {
+    cookie: s.eve,
+  });
+  assert.equal(list.status, 200, 'viewer member reads threads');
+  assert.equal(((await list.json()) as { threads: { id: string }[] }).threads[0]!.id, tid);
+
+  assert.equal(
+    (await api(s.app, 'GET', '/api/comments/alice/demo?path=index.html')).status,
+    401,
+    'anonymous stays 401',
+  );
+  const carol = await api(s.app, 'GET', '/api/comments/alice/demo?path=index.html', {
+    cookie: s.carol,
+  });
+  assert.equal(carol.status, 403);
+  assert.equal(((await carol.json()) as { code: string }).code, 'site.access.forbidden');
+});
+
+test('members mode thread routes: create (commenter+): commenter 200, viewer 403, non-member 403, share-guest 200', async () => {
+  const s = await setup();
+  await addMember(s.db, s.demoId, 'u-dan', 'commenter');
+  await addMember(s.db, s.demoId, 'u-eve', 'viewer');
+  await setMode(s, 'members');
+
+  assert.equal(
+    (await api(s.app, 'POST', '/api/comments/alice/demo', { body: threadBody(), cookie: s.dan }))
+      .status,
+    200,
+    'commenter creates',
+  );
+  for (const [label, cookie] of [
+    ['viewer member', s.eve],
+    ['non-member', s.carol],
+  ] as const) {
+    const r = await api(s.app, 'POST', '/api/comments/alice/demo', { body: threadBody(), cookie });
+    assert.equal(r.status, 403, `${label} cannot create`);
+    assert.equal(((await r.json()) as { code: string }).code, 'site.access.forbidden');
+  }
+  const guestCookie = await redeemShareGuest(s.app, s.alice);
+  assert.equal(
+    (
+      await api(s.app, 'POST', '/api/comments/alice/demo', {
+        body: threadBody(),
+        cookie: guestCookie,
+      })
+    ).status,
+    200,
+    'share-guest keeps the guestComments write rules in members mode',
+  );
+});
+
+test('members mode thread routes: replies (commenter+): commenter 200, viewer 403, non-member 403', async () => {
+  const s = await setup();
+  await addMember(s.db, s.demoId, 'u-dan', 'commenter');
+  await addMember(s.db, s.demoId, 'u-eve', 'viewer');
+  const tid = await createThread(s.app, s.alice);
+  await setMode(s, 'members');
+
+  assert.equal(
+    (
+      await api(s.app, 'POST', `/api/comments/threads/${tid}/replies`, {
+        body: { text: 'noted' },
+        cookie: s.dan,
+      })
+    ).status,
+    200,
+    'commenter replies',
+  );
+  for (const [label, cookie] of [
+    ['viewer member', s.eve],
+    ['non-member', s.carol],
+  ] as const) {
+    const r = await api(s.app, 'POST', `/api/comments/threads/${tid}/replies`, {
+      body: { text: 'no' },
+      cookie,
+    });
+    assert.equal(r.status, 403, `${label} cannot reply`);
+    assert.equal(((await r.json()) as { code: string }).code, 'site.access.forbidden');
+  }
+});
+
+test('members mode thread routes: PATCH resolve and kind (editor+ only)', async () => {
+  const s = await setup();
+  await addMember(s.db, s.demoId, 'u-bob', 'editor');
+  await addMember(s.db, s.demoId, 'u-dan', 'commenter');
+  await addMember(s.db, s.demoId, 'u-eve', 'viewer');
+  const tid = await createThread(s.app, s.alice);
+  await setMode(s, 'members');
+
+  for (const [label, cookie] of [
+    ['owner', s.alice],
+    ['editor', s.bob],
+  ] as const) {
+    assert.equal(
+      (
+        await api(s.app, 'PATCH', `/api/comments/threads/${tid}`, {
+          body: { resolved: true },
+          cookie,
+        })
+      ).status,
+      200,
+      `${label} resolves`,
+    );
+  }
+  for (const [label, cookie] of [
+    ['commenter', s.dan],
+    ['viewer', s.eve],
+    ['non-member', s.carol],
+  ] as const) {
+    for (const body of [{ resolved: true }, { kind: 'question' }]) {
+      const r = await api(s.app, 'PATCH', `/api/comments/threads/${tid}`, { body, cookie });
+      assert.equal(r.status, 403, `${label} blocked on ${Object.keys(body)[0]}`);
+      assert.equal(((await r.json()) as { code: string }).code, 'site.access.forbidden');
+    }
+  }
+  assert.equal(
+    (
+      await api(s.app, 'PATCH', `/api/comments/threads/${tid}`, {
+        body: { kind: 'bug' },
+        cookie: s.bob,
+      })
+    ).status,
+    200,
+    'editor re-kinds',
+  );
+});
+
+test('members mode thread routes: DELETE unchanged — viewer-role author still deletes own thread', async () => {
+  const s = await setup();
+  const tid = await createThread(s.app, s.eve, 'eve authors before the flip (open mode)');
+  await addMember(s.db, s.demoId, 'u-eve', 'viewer');
+  await setMode(s, 'members');
+  assert.equal(
+    (await api(s.app, 'DELETE', `/api/comments/threads/${tid}`, { cookie: s.eve })).status,
+    200,
+    'author rights are outside the W4 minimums and survive the viewer floor',
+  );
+});
+
+// ───────────────────────── 11. W4: site_access_mode admin endpoints ─────────────────────────
+
+test('admin settings GET carries site_access_mode and the locked flag', async () => {
+  const s = await setup();
+  const res = await api(s.app, 'GET', '/api/admin/settings', { cookie: s.admin });
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as {
+    registration_mode: string;
+    registration_locked: boolean;
+    site_access_mode: string;
+    site_access_mode_locked: boolean;
+  };
+  assert.equal(body.registration_mode, 'open');
+  assert.equal(body.registration_locked, false);
+  assert.equal(body.site_access_mode, 'open');
+  assert.equal(body.site_access_mode_locked, false);
+});
+
+test('admin settings PATCH validation: empty 422, invalid 422, malformed 422, non-admin 403', async () => {
+  const s = await setup();
+  const nonAdmin = await api(s.app, 'PATCH', '/api/admin/settings', {
+    body: { site_access_mode: 'members' },
+    cookie: s.carol,
+  });
+  assert.equal(nonAdmin.status, 403);
+  for (const [body, code] of [
+    [{}, 'admin.settings.empty'],
+    [{ site_access_mode: 'invite' }, 'admin.settings.siteAccessMode.invalid'],
+    [{ registration_mode: 'maybe' }, 'admin.settings.registrationMode.invalid'],
+  ] as const) {
+    const r = await api(s.app, 'PATCH', '/api/admin/settings', { body, cookie: s.admin });
+    assert.equal(r.status, 422, JSON.stringify(body));
+    assert.equal(((await r.json()) as { code: string }).code, code);
+  }
+  assert.equal(
+    (
+      await s.app.fetch(
+        new Request('http://localhost/api/admin/settings', {
+          method: 'PATCH',
+          headers: { cookie: s.admin, 'x-csrf-token': CSRF, 'content-type': 'application/json' },
+          body: JSON.stringify(['nope']),
+        }),
+      )
+    ).status,
+    422,
+    'array body counts as malformed',
+  );
+});
+
+test('admin settings PATCH: registration_mode-only body still works, response is a superset', async () => {
+  const s = await setup();
+  const res = await api(s.app, 'PATCH', '/api/admin/settings', {
+    body: { registration_mode: 'invite' },
+    cookie: s.admin,
+  });
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { registration_mode: string; site_access_mode: string };
+  assert.equal(body.registration_mode, 'invite');
+  assert.equal(body.site_access_mode, 'open');
+});
+
+test('env lock: PAGEPIN_SITE_ACCESS_MODE=members reports locked; mode PATCH is 400; registration PATCH still works', async () => {
+  const s = await setup({ PAGEPIN_SITE_ACCESS_MODE: 'members' });
+  const get = (await (
+    await api(s.app, 'GET', '/api/admin/settings', { cookie: s.admin })
+  ).json()) as { site_access_mode: string; site_access_mode_locked: boolean };
+  assert.equal(get.site_access_mode, 'members');
+  assert.equal(get.site_access_mode_locked, true);
+
+  assert.equal(
+    (await contentFetch(s.app, 'alice', 'demo', s.carol)).status,
+    403,
+    'seam honors the env lock',
+  );
+  assert.equal(
+    (await contentFetch(s.app, 'alice', 'demo', s.alice)).status,
+    200,
+    'owner unaffected',
+  );
+
+  const locked = await api(s.app, 'PATCH', '/api/admin/settings', {
+    body: { site_access_mode: 'open' },
+    cookie: s.admin,
+  });
+  assert.equal(locked.status, 400);
+  assert.equal(
+    ((await locked.json()) as { code: string }).code,
+    'admin.settings.siteAccessModeLocked',
+  );
+
+  assert.equal(
+    (
+      await api(s.app, 'PATCH', '/api/admin/settings', {
+        body: { registration_mode: 'invite' },
+        cookie: s.admin,
+      })
+    ).status,
+    200,
+    'an unlocked field still writes while the other is env-locked',
+  );
+});
+
+// ───────────────────────── 12. W4: open-mode no-regression ─────────────────────────
+
+test('explicit PAGEPIN_SITE_ACCESS_MODE=open equals the open default (serving + one create)', async () => {
+  const s = await setup({ PAGEPIN_SITE_ACCESS_MODE: 'open' });
+  const get = (await (
+    await api(s.app, 'GET', '/api/admin/settings', { cookie: s.admin })
+  ).json()) as { site_access_mode: string; site_access_mode_locked: boolean };
+  assert.equal(get.site_access_mode, 'open');
+  assert.equal(get.site_access_mode_locked, true);
+
+  const page = await contentFetch(s.app, 'alice', 'demo', s.carol);
+  assert.equal(page.status, 200, 'explicit open serves non-members');
+  const html = await page.text();
+  assert.ok(html.includes('Hello Secret'));
+  assert.ok(html.includes('/_pagepin/comments.js'), 'explicit open keeps the overlay');
+  assert.equal(
+    (await createThread(s.app, s.carol, 'carol still creates threads')).length > 0,
+    true,
+  );
 });

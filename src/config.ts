@@ -3,6 +3,7 @@
 import { isSupportedSocialProvider, SOCIAL_PROVIDER_IDS } from './auth/social.js';
 import { inferDbDriver, type DbDriver } from './db/driver.js';
 import { SUPPORTED, type Locale } from './i18n/index.js';
+import type { SiteAccessMode } from './rbac.js';
 
 /** 社交登录 provider(与 password/oidc 并存,独立配置)。 */
 export interface SocialProvider {
@@ -64,6 +65,8 @@ export interface Config {
   allowSignup: boolean;
   /** 注册模式的 env 覆盖;显式设置则锁定(管理员不能在 UI 改),未设置时由 DB instance_settings 决定。 */
   registrationMode?: 'open' | 'invite' | 'closed';
+  /** Site access mode env override (W4); an explicit value locks the console UI (mirrors registrationMode). */
+  siteAccessMode?: SiteAccessMode;
   adminEmail?: string;
   adminPassword?: string;
   /** 社交登录(可与 password/oidc 同时启用);空数组 = 未配置 */
@@ -152,6 +155,16 @@ export function loadConfig(env: Env): Config {
       throw new Error(`PAGEPIN_REGISTRATION_MODE 只能是 open/invite/closed,收到:${rmRaw}`);
     }
     registrationMode = rmRaw as Config['registrationMode'];
+  }
+
+  // Site access mode env override (W4): an explicit PAGEPIN_SITE_ACCESS_MODE locks the console UI.
+  let siteAccessMode: Config['siteAccessMode'];
+  const samRaw = env.PAGEPIN_SITE_ACCESS_MODE;
+  if (samRaw !== undefined && samRaw !== '') {
+    if (samRaw !== 'open' && samRaw !== 'members') {
+      throw new Error(`PAGEPIN_SITE_ACCESS_MODE must be open/members, received: ${samRaw}`);
+    }
+    siteAccessMode = samRaw as Config['siteAccessMode'];
   }
 
   let oidc: OidcConfig | undefined;
@@ -298,6 +311,7 @@ export function loadConfig(env: Env): Config {
     authMode,
     allowSignup: bool(env, 'PAGEPIN_ALLOW_SIGNUP', true),
     registrationMode,
+    siteAccessMode,
     adminEmail: env.PAGEPIN_ADMIN_EMAIL || undefined,
     adminPassword: env.PAGEPIN_ADMIN_PASSWORD || undefined,
     socialProviders,

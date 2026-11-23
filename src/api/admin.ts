@@ -24,10 +24,16 @@ import { jsonError } from '../i18n/locale.js';
 import { purgeSiteStorage } from '../storage/index.js';
 import {
   effectiveRegistrationMode,
+  effectiveSiteAccessMode,
   isRegistrationMode,
+  isSiteAccessMode,
   registrationModeLocked,
   setRegistrationMode,
+  setSiteAccessMode,
+  siteAccessModeLocked,
+  type RegistrationMode,
 } from '../instance-settings.js';
+import type { SiteAccessMode } from '../rbac.js';
 import type { AppDeps, AppEnv } from '../types.js';
 import { nowIso, tombstoneSlug, uuid, validEmail } from '../util.js';
 import type { AuthMiddleware } from './deps.js';
@@ -310,12 +316,14 @@ export function makeAdminRoutes(deps: AppDeps, mw: AuthMiddleware): Hono<AppEnv>
     return c.json({ ok: true });
   });
 
-  // ---- 实例设置:注册模式 ----
+  // ---- 实例设置:注册模式 + 站点访问模式 ----
   r.get('/settings', mw.adminUser, async (c) =>
     c.json({
       auth_mode: cfg.authMode,
       registration_mode: await effectiveRegistrationMode(deps),
       registration_locked: registrationModeLocked(deps),
+      site_access_mode: await effectiveSiteAccessMode(deps),
+      site_access_mode_locked: siteAccessModeLocked(deps),
       limits: {
         max_file_mb: cfg.maxFileMb,
         max_site_mb: cfg.maxSiteMb,
@@ -326,15 +334,45 @@ export function makeAdminRoutes(deps: AppDeps, mw: AuthMiddleware): Hono<AppEnv>
   );
 
   r.patch('/settings', mw.adminMutatingUser, async (c) => {
-    if (registrationModeLocked(deps)) {
-      return jsonError(c, 400, 'admin.settings.registrationLocked');
+    // Per-field validation (W4): each recognized field validates alone, one locked
+    // field never blocks the other, and a body without recognized fields is 422.
+    const body = await readJson<Record<string, unknown>>(c);
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return jsonError(c, 422, 'request.body.malformed');
     }
-    const body = await readJson<{ registration_mode?: unknown }>(c);
-    if (!body || !isRegistrationMode(body.registration_mode)) {
-      return jsonError(c, 422, 'admin.settings.registrationMode.invalid');
+    const hasRegistration = 'registration_mode' in body;
+    const hasSiteAccessMode = 'site_access_mode' in body;
+    if (!hasRegistration && !hasSiteAccessMode) {
+      return jsonError(c, 422, 'admin.settings.empty');
     }
-    await setRegistrationMode(deps, body.registration_mode);
-    return c.json({ registration_mode: body.registration_mode });
+    // Validate every present field before any write: no partial application on error.
+    let registration: RegistrationMode | undefined;
+    let siteMode: SiteAccessMode | undefined;
+    if (hasRegistration) {
+      if (registrationModeLocked(deps)) {
+        return jsonError(c, 400, 'admin.settings.registrationLocked');
+      }
+      if (!isRegistrationMode(body.registration_mode)) {
+        return jsonError(c, 422, 'admin.settings.registrationMode.invalid');
+      }
+      registration = body.registration_mode;
+    }
+    if (hasSiteAccessMode) {
+      if (siteAccessModeLocked(deps)) {
+        return jsonError(c, 400, 'admin.settings.siteAccessModeLocked');
+      }
+      if (!isSiteAccessMode(body.site_access_mode)) {
+        return jsonError(c, 422, 'admin.settings.siteAccessMode.invalid');
+      }
+      siteMode = body.site_access_mode;
+    }
+    if (registration !== undefined) await setRegistrationMode(deps, registration);
+    if (siteMode !== undefined) await setSiteAccessMode(deps, siteMode);
+    // Echo the effective values after the writes (superset of the old single-field echo).
+    return c.json({
+      registration_mode: await effectiveRegistrationMode(deps),
+      site_access_mode: await effectiveSiteAccessMode(deps),
+    });
   });
 
   // ---- 邀请 ----

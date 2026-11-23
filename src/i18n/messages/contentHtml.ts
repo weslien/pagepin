@@ -37,6 +37,11 @@ export const contentHtml: Record<Locale, Record<string, string>> = {
       'The link has expired or was revoked by the site owner. Ask the person who shared it with you for a fresh link.',
     'html.shareExpired.button': 'Sign in instead',
 
+    // —— 品牌门页:members 模式访问受限(serving.accessDeniedHtml,W4/D2) ——
+    'html.accessDenied.title': 'Access denied · pagepin',
+    'html.accessDenied.heading': 'You do not have access to this site',
+    'html.accessDenied.body': '{slug} is open to site members only. Ask the site owner to add you.',
+
     // —— 试用站缎带(serving.trialRibbonHtml) ——
     'html.trial.ribbon': 'Trial page · expires in {left}',
     'html.trial.keep': 'Keep this page',
@@ -114,6 +119,11 @@ export const contentHtml: Record<Locale, Record<string, string>> = {
     'html.shareExpired.heading': '此分享链接已失效',
     'html.shareExpired.body': '链接已过期，或已被站点所有者撤销。请向分享给你的人索取新链接。',
     'html.shareExpired.button': '改用登录',
+
+    // —— 品牌门页:members 模式访问受限(W4/D2) ——
+    'html.accessDenied.title': '访问受限 · pagepin',
+    'html.accessDenied.heading': '你无权访问此站点',
+    'html.accessDenied.body': '{slug} 仅向站点成员开放。请联系站点所有者将你加入。',
 
     // —— 试用站缎带 ——
     'html.trial.ribbon': '试用页 · {left} 后过期',

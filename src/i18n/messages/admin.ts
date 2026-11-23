@@ -21,6 +21,11 @@ export const admin: Record<Locale, Record<string, string>> = {
       'Registration mode is locked by an environment variable and cannot be changed here',
     'admin.settings.registrationMode.invalid':
       'registration_mode must be one of open/invite/closed',
+    'admin.settings.empty':
+      'The request body has no recognized settings field (registration_mode / site_access_mode)',
+    'admin.settings.siteAccessMode.invalid': 'site_access_mode must be one of open/members',
+    'admin.settings.siteAccessModeLocked':
+      'Site access mode is locked by an environment variable and cannot be changed here',
 
     // —— 邀请 ——
     'admin.invite.passwordModeOnly':
@@ -42,6 +47,9 @@ export const admin: Record<Locale, Record<string, string>> = {
     // —— 实例设置:注册模式 ——
     'admin.settings.registrationLocked': '注册模式由环境变量锁定，不能在此修改',
     'admin.settings.registrationMode.invalid': 'registration_mode 只能是 open/invite/closed',
+    'admin.settings.empty': '请求体没有可识别的设置字段（registration_mode / site_access_mode）',
+    'admin.settings.siteAccessMode.invalid': 'site_access_mode 只能是 open/members',
+    'admin.settings.siteAccessModeLocked': '站点访问模式由环境变量锁定，不能在此修改',
 
     // —— 邀请 ——
     'admin.invite.passwordModeOnly': '邀请注册仅在密码登录模式可用',

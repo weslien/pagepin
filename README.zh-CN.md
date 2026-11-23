@@ -91,6 +91,7 @@ Claude Code 也可作为插件安装：
 | `PAGEPIN_BASE_URL` | `http://localhost:8000` | 实例的公开 URL（单域模式）。 |
 | `PAGEPIN_ADMIN_EMAIL` / `…_PASSWORD` | — | 两者都设则启动时 upsert 一个管理员；否则首个注册者成为管理员。 |
 | `PAGEPIN_AUTH_MODE` | `password` | `password`、`oidc` 或 `none`（仅开发：自动以管理员身份登录）。 |
+| `PAGEPIN_SITE_ACCESS_MODE` | `open` | `open` 或 `members`（设置后锁定控制台 UI）。`members`：私有站点仅向站点成员开放；已登录的非成员收到 403 页面；分享链接与公开窗口保持开放。 |
 | `PAGEPIN_DEFAULT_LOCALE` | `en` | 回落语言（`en` 或 `zh`）。每次请求按 `?lang=` → `pp_lang` cookie → `Accept-Language` 覆盖。 |
 | `PAGEPIN_STORAGE` | `fs` | `fs`（本地磁盘）或 `s3`（S3 兼容）。 |
 

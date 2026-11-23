@@ -37,6 +37,7 @@ import {
 } from './generated/edge-assets.js';
 import { t, type Locale } from './i18n/index.js';
 import { jsonError, localeOf } from './i18n/locale.js';
+import { effectiveSiteAccessMode } from './instance-settings.js';
 import type { Plane } from './auth/sessions.js';
 import {
   readSession,
@@ -56,6 +57,8 @@ import {
 } from './share.js';
 import { currentVersion, isPubliclyVisible, shareLinks, sites, users } from './db/index.js';
 import type { SiteRow, SiteVersion } from './db/index.js';
+import type { SiteRole } from './rbac.js';
+import { roleAtLeast, roleOnSite } from './site-access.js';
 import { NotFoundError, NotModifiedError } from './storage/index.js';
 import type { ObjectMeta } from './storage/index.js';
 import type { AppDeps, AppEnv } from './types.js';
@@ -307,6 +310,29 @@ function shareExpiredHtml(loginHref: string, locale: Locale, hint: AgentHint): s
 <h1>${t(locale, 'html.shareExpired.heading')}</h1>
 <p class="body">${t(locale, 'html.shareExpired.body')}</p>
 <a class="btn btn-ghost" href="${escapeHtml(loginHref)}">${t(locale, 'html.shareExpired.button')}</a>
+<div class="foot">${t(locale, 'html.hostedOn')} <span class="mono">pagepin</span></div>
+${hint.foot}`,
+      locale,
+      hint.head,
+    )
+  );
+}
+
+/** Members-mode denial (W4, D2 ruling): a signed-in viewer without any site role on a private
+ *  site. One more variant of the gate-page family: slug named (no existence-hiding), no
+ *  sign-in button — the viewer is signed in, and the fix is membership, not login. */
+function accessDeniedHtml(slug: string, locale: Locale, hint: AgentHint): string {
+  const slugSpan = `<span class="mono teal">${escapeHtml(slug)}</span>`;
+  const otherLocale: Locale = locale === 'zh' ? 'en' : 'zh';
+  const otherLabel = otherLocale === 'zh' ? '中文' : 'English';
+  const langLink = `<div class="pp-lang"><a href="?lang=${otherLocale}">${GLOBE_SVG} ${otherLabel}</a></div>`;
+  return (
+    hint.comment +
+    gateDoc(
+      t(locale, 'html.accessDenied.title'),
+      `${langLink}<div class="chip chip-teal">${LOCK_SVG}</div>
+<h1>${t(locale, 'html.accessDenied.heading')}</h1>
+<p class="body">${t(locale, 'html.accessDenied.body', { slug: slugSpan })}</p>
 <div class="foot">${t(locale, 'html.hostedOn')} <span class="mono">pagepin</span></div>
 ${hint.foot}`,
       locale,
@@ -951,9 +977,33 @@ export function makeServingRoutes(deps: AppDeps, opts: ServingOptions = {}): Hon
       const ownerName = owner?.displayName || `@${handle}`;
       return c.html(loginWallHtml(slug, ownerName, loginHref, locale, hint), 200, gateHeaders);
     }
+    // ---- Members-mode gate (W4): placed after the login wall — disjoint conditions
+    // (the wall serves !viewerActive traffic only, this 403 path viewerActive traffic only).
+    // Reads the effective mode once per logged-in request (design §6); resolves the content-plane
+    // role even for public sites because the overlay-inject decision below needs it.
+    // Share-guests are exempt (share scope, revocable); public windows stay public.
+    let membersMode = false;
+    let viewerRole: SiteRole | null = null;
+    if (viewerActive && claims !== null) {
+      if ((await effectiveSiteAccessMode(deps)) === 'members') {
+        membersMode = true;
+        viewerRole = await roleOnSite(db, claims.sub, site);
+        if (!pub && !shareViewer && !roleAtLeast(viewerRole, 'viewer')) {
+          const gateHeaders = { 'Cache-Control': 'no-store, private', ...agentHeaders };
+          const hint = agentHint(slug, consoleBase(cfg), locale);
+          hint.head += ogMetaTags(cfg, siteUrl(cfg, handle, slug), locale, 'pagepin');
+          return c.html(accessDeniedHtml(slug, locale, hint), 403, gateHeaders);
+        }
+      }
+    }
     // 评论层注入:登录访问者一律注入;分享会话访客仅当站点开了 guest 评论才注入
     // (匿名公开访客[对外客户]看到的仍是干净页面)
-    const canInject = site.commentsEnabled && (viewerActive || (shareViewer && site.guestComments));
+    // W4: in members mode, the signed-in inject narrows to commenter and up (viewerRole below).
+    const canInject =
+      site.commentsEnabled &&
+      (viewerActive
+        ? !membersMode || roleAtLeast(viewerRole, 'commenter')
+        : shareViewer && site.guestComments);
     // 试用站(匿名 drop):HTML 一律注入右下角缎带(到期倒计时 + 引导注册保留)
     const isTrial = site.expiresAt !== null;
 

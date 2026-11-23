@@ -8,6 +8,7 @@ import { eq } from 'drizzle-orm';
 
 import { instanceSettings } from './db/index.js';
 import { upsert } from './db/ops.js';
+import type { SiteAccessMode } from './rbac.js';
 import type { AppDeps } from './types.js';
 
 export const REGISTRATION_MODES = ['open', 'invite', 'closed'] as const;
@@ -49,4 +50,29 @@ export async function effectiveRegistrationMode(deps: AppDeps): Promise<Registra
 
 export async function setRegistrationMode(deps: AppDeps, mode: RegistrationMode): Promise<void> {
   await setSetting(deps, 'registration_mode', mode);
+}
+
+// ---- Site access mode (W4): env lock > DB instance setting > 'open' (the only default) ----
+
+export const SITE_ACCESS_MODES = ['open', 'members'] as const;
+
+export function isSiteAccessMode(v: unknown): v is SiteAccessMode {
+  return typeof v === 'string' && (SITE_ACCESS_MODES as readonly string[]).includes(v);
+}
+
+/** Whether the env locked the site access mode (locked = the console UI cannot change it). */
+export function siteAccessModeLocked(deps: AppDeps): boolean {
+  return deps.config.siteAccessMode !== undefined;
+}
+
+/** The effective site access mode for one request (design §6). */
+export async function effectiveSiteAccessMode(deps: AppDeps): Promise<SiteAccessMode> {
+  if (deps.config.siteAccessMode) return deps.config.siteAccessMode; // env lock
+  const stored = await getSetting(deps, 'site_access_mode');
+  if (isSiteAccessMode(stored)) return stored;
+  return 'open'; // default open everywhere; the flip is a deployment choice (W7), never code
+}
+
+export async function setSiteAccessMode(deps: AppDeps, mode: SiteAccessMode): Promise<void> {
+  await setSetting(deps, 'site_access_mode', mode);
 }
