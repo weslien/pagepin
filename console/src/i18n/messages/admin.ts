@@ -47,6 +47,21 @@ export const admin: Record<Locale, Record<string, string>> = {
     'admin.reg.open.label': 'Open',
     'admin.reg.open.desc': 'Anyone with the URL can self-register. Best for trusted networks.',
 
+    // —— 站点访问模式(W6) ——
+    'admin.access.heading': 'Site access',
+    'admin.access.note':
+      'Applies to every site: “Open” keeps the per-site visibility rules; “Members” additionally restricts private sites to the owner, site members, and group grants.',
+    'admin.access.open.label': 'Open',
+    'admin.access.open.desc':
+      'Visibility works as before: private sites need a signed-in account, public windows stay public.',
+    'admin.access.members.label': 'Members',
+    'admin.access.members.desc':
+      'Private sites serve the owner, site members, and group grants; signed-in non-members get 403. Share links and public windows stay open.',
+    'admin.access.changed': 'Site access: {mode}',
+    'admin.access.changeFailed': 'Could not change site access',
+    'admin.access.lockedPre': 'Locked by',
+    'admin.access.lockedPost': '— unset it to change here.',
+
     // —— 邀请 ——
     'admin.invite.heading': 'Invite a user',
     'admin.invite.oneTimeNote': '· one-time link, expires soon',
@@ -182,6 +197,20 @@ export const admin: Record<Locale, Record<string, string>> = {
     'admin.reg.invite.desc': '只能通过你生成的一次性邀请链接加入。',
     'admin.reg.open.label': '开放',
     'admin.reg.open.desc': '任何拿到 URL 的人都可自助注册，适合可信网络。',
+
+    // —— 站点访问模式(W6) ——
+    'admin.access.heading': '站点访问',
+    'admin.access.note':
+      '对所有站点生效：「开放」沿用各站点的可见性规则；「仅成员」在此基础上把私有站点限制为所有者、站点成员与组授予。',
+    'admin.access.open.label': '开放',
+    'admin.access.open.desc': '可见性规则照旧：私有站点仍需登录访问，公开窗口保持公开。',
+    'admin.access.members.label': '仅成员',
+    'admin.access.members.desc':
+      '私有站点仅向所有者、站点成员与组授予开放；已登录的非成员收到 403。分享链接与公开窗口保持开放。',
+    'admin.access.changed': '站点访问模式：{mode}',
+    'admin.access.changeFailed': '无法切换站点访问模式',
+    'admin.access.lockedPre': '已被',
+    'admin.access.lockedPost': '锁定 —— 取消该环境变量后方可在此修改。',
 
     // —— 邀请 ——
     'admin.invite.heading': '邀请用户',

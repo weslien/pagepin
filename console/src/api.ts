@@ -5,6 +5,8 @@ import type {
   AdminUser,
   AuthConfig,
   CollectedFile,
+  DeviceRequest,
+  GroupGrant,
   Identity,
   Invite,
   InviteCreated,
@@ -12,7 +14,10 @@ import type {
   RegistrationMode,
   ShareLinkItem,
   ShareLinkOut,
+  SiteAccessMode,
+  SiteMember,
   SiteOut,
+  SiteRole,
   TokenItem,
   Usage,
   VersionsOut,
@@ -207,12 +212,44 @@ export const api = {
       body: JSON.stringify({ version_id: versionId }),
     }),
 
+  // ---- site members & group grants (owner-only; grantable roles: editor|commenter|viewer) ----
+  listMembers: (slug: string) =>
+    request<{ members: SiteMember[] }>(`/api/sites/${encodeURIComponent(slug)}/members`),
+
+  putMember: (slug: string, body: { handle: string; role: SiteRole }) =>
+    request<SiteMember>(`/api/sites/${encodeURIComponent(slug)}/members`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+
+  deleteMember: (slug: string, id: string) =>
+    request<{ ok: true }>(
+      `/api/sites/${encodeURIComponent(slug)}/members/${encodeURIComponent(id)}`,
+      { method: 'DELETE' },
+    ),
+
+  listGroupGrants: (slug: string) =>
+    request<{ grants: GroupGrant[] }>(`/api/sites/${encodeURIComponent(slug)}/group-grants`),
+
+  putGroupGrant: (slug: string, body: { group_name: string; role: SiteRole }) =>
+    request<GroupGrant>(`/api/sites/${encodeURIComponent(slug)}/group-grants`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+
+  deleteGroupGrant: (slug: string, id: string) =>
+    request<{ ok: true }>(
+      `/api/sites/${encodeURIComponent(slug)}/group-grants/${encodeURIComponent(id)}`,
+      { method: 'DELETE' },
+    ),
+
   listTokens: () => request<{ tokens: TokenItem[] }>('/api/tokens'),
 
-  createToken: (name: string) =>
+  /** Scopes omitted or empty = full access; a non-empty subset limits the token. */
+  createToken: (name: string, scopes?: string[]) =>
     request<TokenItem>('/api/tokens', {
       method: 'POST',
-      body: JSON.stringify({ name }),
+      body: JSON.stringify(scopes && scopes.length > 0 ? { name, scopes } : { name }),
     }),
 
   rotateToken: (id: string) =>
@@ -222,6 +259,10 @@ export const api = {
     request<{ ok: true }>(`/api/tokens/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
   // ---- device authorization (OAuth2 device grant) ----
+  /** Pending-request readback: what scope the agent asked for. 404s once handled or expired. */
+  deviceRequest: (userCode: string) =>
+    request<DeviceRequest>(`/api/device/request/${encodeURIComponent(userCode)}`),
+
   approveDevice: (userCode: string) =>
     request<{ ok: boolean; token_name?: string }>('/api/device/approve', {
       method: 'POST',
@@ -283,6 +324,15 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify({ registration_mode: mode }),
     }),
+
+  setSiteAccessMode: (mode: SiteAccessMode) =>
+    request<{ registration_mode: RegistrationMode; site_access_mode: SiteAccessMode }>(
+      '/api/admin/settings',
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ site_access_mode: mode }),
+      },
+    ),
 
   // ---- admin: site moderation ----
   adminSites: () => request<{ sites: AdminSite[] }>('/api/admin/sites'),

@@ -63,6 +63,15 @@ export const tokens: Record<Locale, Record<string, string>> = {
     'tokens.revokeConfirm': 'Revoke',
     'tokens.revoked': 'Revoked',
     'tokens.revokeFailed': 'Revoke failed',
+
+    // —— scopes(W6) ——
+    'tokens.scope.publish': 'publish',
+    'tokens.scope.comment': 'comment',
+    'tokens.scope.read': 'read',
+    'tokens.fullAccess': 'full access',
+    'tokens.scopeHint':
+      'No scope selected = full access. Pick one or more to limit what this token can do — “read” alone makes it view-only.',
+    'tokens.requestedScope': 'Requested access:',
   },
   zh: {
     // —— 弹窗 / 标题 ——
@@ -118,5 +127,14 @@ export const tokens: Record<Locale, Record<string, string>> = {
     'tokens.revokeConfirm': '吊销',
     'tokens.revoked': '已吊销',
     'tokens.revokeFailed': '吊销失败',
+
+    // —— scopes(W6) ——
+    'tokens.scope.publish': '发布',
+    'tokens.scope.comment': '评论',
+    'tokens.scope.read': '读取',
+    'tokens.fullAccess': '全部权限',
+    'tokens.scopeHint':
+      '不选任何 scope = 全部权限。选择一个或多个以限制该 token 的能力——“读取”单独选中即只读。',
+    'tokens.requestedScope': '请求的权限：',
   },
 };

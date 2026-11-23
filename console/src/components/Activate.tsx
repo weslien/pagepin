@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { AlertTriangle, Check, KeyRound, Loader2 } from 'lucide-react';
 import { api } from '../api';
 import { useT } from '../i18n';
 import { useStore } from '../store';
+import type { DeviceRequest } from '../types';
 import { HandleSetup } from './HandleSetup';
 
 /** 设备授权确认屏(/activate?user_code=XXXX-XXXX)。
@@ -18,6 +19,17 @@ export function Activate() {
     .toUpperCase();
   const [phase, setPhase] = useState<'idle' | 'working' | 'approved' | 'denied' | 'error'>('idle');
   const [error, setError] = useState<string | null>(null);
+  const [request, setRequest] = useState<DeviceRequest | null>(null);
+
+  // Best-effort requested-scope readback (W2 lookup): an expired or already-handled
+  // code 404s silently and this line simply stays hidden — approve still surfaces errors.
+  useEffect(() => {
+    if (!userCode) return;
+    api
+      .deviceRequest(userCode)
+      .then(setRequest)
+      .catch(() => {});
+  }, [userCode]);
 
   const who = me?.handle ?? me?.email ?? t('auth.yourAccount');
 
@@ -144,6 +156,24 @@ export function Activate() {
       <div className="mt-4 rounded-field border border-ink-200 bg-ink-50 px-3 py-2.5 text-center font-mono text-lg font-semibold tracking-[0.3em] text-ink-800">
         {userCode}
       </div>
+
+      {request && (
+        <div className="mt-2 flex flex-wrap items-center justify-center gap-1.5 text-left">
+          <span className="text-xs text-ink-500">{t('tokens.requestedScope')}</span>
+          {request.scopes && request.scopes.length > 0 ? (
+            request.scopes.map((s) => (
+              <span
+                key={s}
+                className="rounded-full bg-white px-2 py-0.5 text-[11px] font-semibold text-tide-700 ring-1 ring-tide-200"
+              >
+                {t(`tokens.scope.${s}`)}
+              </span>
+            ))
+          ) : (
+            <span className="text-xs font-semibold text-ink-600">{t('tokens.fullAccess')}</span>
+          )}
+        </div>
+      )}
 
       <div className="mt-2 min-h-[18px] text-xs">
         {error && <span className="text-red-600">{error}</span>}

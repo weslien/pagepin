@@ -1,5 +1,8 @@
 export type RegistrationMode = 'open' | 'invite' | 'closed';
 
+export type SiteRole = 'owner' | 'editor' | 'commenter' | 'viewer';
+export type SiteAccessMode = 'open' | 'members';
+
 export interface AuthConfig {
   mode: 'password' | 'oidc' | 'none';
   allow_signup: boolean;
@@ -124,6 +127,30 @@ export interface VersionsOut {
   versions: VersionItem[];
 }
 
+/** One row of GET /api/sites/:slug/members (owner-only list). */
+export interface SiteMember {
+  id: string;
+  user_id: string;
+  handle: string;
+  role: SiteRole;
+  created_at: string;
+}
+
+/** One row of GET /api/sites/:slug/group-grants (owner-only list). */
+export interface GroupGrant {
+  id: string;
+  group_name: string;
+  role: SiteRole;
+  created_at: string;
+}
+
+/** GET /api/device/request/:userCode — pending-request readback for the approve screen. */
+export interface DeviceRequest {
+  user_code: string;
+  status: string;
+  scopes: string[] | null;
+}
+
 export interface TokenItem {
   id: string;
   name: string;
@@ -134,6 +161,8 @@ export interface TokenItem {
   last_used_at: string | null;
   /** 非空 = 到期时间(设备登录铸的 token 有);null = 不过期 */
   expires_at: string | null;
+  /** Token scopes: null = full access (default); a subset of publish|comment|read. */
+  scopes: string[] | null;
 }
 
 export interface AdminUser {
@@ -181,6 +210,9 @@ export interface AdminSettings {
   auth_mode: 'password' | 'oidc' | 'none';
   registration_mode: RegistrationMode;
   registration_locked: boolean;
+  /** Instance-wide content serving gate (W4): 'members' restricts private-site serving to the owner, members, and group grants. */
+  site_access_mode: SiteAccessMode;
+  site_access_mode_locked: boolean;
   limits: Limits;
 }
 

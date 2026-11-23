@@ -31,6 +31,7 @@ import type {
   Invite,
   InviteCreated,
   RegistrationMode,
+  SiteAccessMode,
 } from '../types';
 import { toast, toastError } from './Toast';
 
@@ -38,6 +39,12 @@ const REG_MODES: { key: RegistrationMode; labelKey: string; descKey: string }[] 
   { key: 'closed', labelKey: 'admin.reg.closed.label', descKey: 'admin.reg.closed.desc' },
   { key: 'invite', labelKey: 'admin.reg.invite.label', descKey: 'admin.reg.invite.desc' },
   { key: 'open', labelKey: 'admin.reg.open.label', descKey: 'admin.reg.open.desc' },
+];
+
+// Auth-mode-independent setting (W4 server seam); the env var locks it like registration.
+const ACCESS_MODES: { key: SiteAccessMode; labelKey: string; descKey: string }[] = [
+  { key: 'open', labelKey: 'admin.access.open.label', descKey: 'admin.access.open.desc' },
+  { key: 'members', labelKey: 'admin.access.members.label', descKey: 'admin.access.members.desc' },
 ];
 
 const AVA = ['#0b6358', '#1f4f86', '#8a560b', '#5b3596', '#b14a42'];
@@ -162,6 +169,20 @@ export function Admin() {
         toast(t('admin.reg.changed', { mode }));
       })
       .catch((e) => toastError(e, t('admin.reg.changeFailed')));
+  };
+
+  const siteMode = settings?.site_access_mode ?? 'open';
+  const siteModeLocked = settings?.site_access_mode_locked ?? false;
+
+  const changeSiteMode = (mode: SiteAccessMode) => {
+    if (siteModeLocked || mode === siteMode || !settings) return;
+    api
+      .setSiteAccessMode(mode)
+      .then(() => {
+        setSettings({ ...settings, site_access_mode: mode });
+        toast(t('admin.access.changed', { mode }));
+      })
+      .catch((e) => toastError(e, t('admin.access.changeFailed')));
   };
 
   const generate = () => {
@@ -544,6 +565,44 @@ export function Admin() {
                 </div>
               )}
             </>
+          )}
+        </Card>
+
+        {/* Site access mode — auth-mode independent, so it renders for every mode (W6) */}
+        <Card>
+          <h2 className="text-sm font-bold text-ink-800">{t('admin.access.heading')}</h2>
+          <p className="mt-1 text-xs text-ink-400">{t('admin.access.note')}</p>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+            {ACCESS_MODES.map((m) => {
+              const active = siteMode === m.key;
+              return (
+                <button
+                  key={m.key}
+                  type="button"
+                  disabled={!settings || siteModeLocked}
+                  onClick={() => changeSiteMode(m.key)}
+                  className={`rounded-panel border p-3 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
+                    active
+                      ? 'border-tide-300 bg-tide-50 ring-1 ring-tide-200'
+                      : 'border-ink-200 bg-white hover:border-tide-200'
+                  }`}
+                >
+                  <div
+                    className={`text-sm font-semibold ${active ? 'text-tide-700' : 'text-ink-700'}`}
+                  >
+                    {t(m.labelKey)}
+                  </div>
+                  <div className="mt-0.5 text-xs text-ink-400">{t(m.descKey)}</div>
+                </button>
+              );
+            })}
+          </div>
+          {siteModeLocked && (
+            <p className="mt-2 text-xs text-ink-400">
+              {t('admin.access.lockedPre')}{' '}
+              <span className="font-mono">PAGEPIN_SITE_ACCESS_MODE</span>{' '}
+              {t('admin.access.lockedPost')}
+            </p>
           )}
         </Card>
 

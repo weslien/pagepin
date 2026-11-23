@@ -11,9 +11,12 @@ import {
   Loader2,
   Lock,
   MessageSquare,
+  Plus,
   Settings2,
   Trash2,
   UploadCloud,
+  Users,
+  UsersRound,
 } from 'lucide-react';
 import { api } from '../api';
 import { useT } from '../i18n';
@@ -21,12 +24,56 @@ import { confirmDanger } from './ConfirmDialog';
 import { ShareLinkDialog } from './ShareLinkDialog';
 import { copyText, formatBytes, formatRelative, formatRemaining } from '../lib/format';
 import { useStore } from '../store';
-import type { SiteOut, VersionsOut } from '../types';
+import type { GroupGrant, SiteMember, SiteOut, SiteRole, VersionsOut } from '../types';
 import { toast, toastError } from './Toast';
 
 const SHARE_HOURS = [1, 6, 24, 72, 168] as const;
 
-type Panel = 'share' | 'settings' | 'versions' | null;
+/** D1 four-role set; the API only accepts the three non-owner values on write. */
+const ROLES: SiteRole[] = ['owner', 'editor', 'commenter', 'viewer'];
+
+type Panel = 'share' | 'settings' | 'versions' | 'members' | 'grants' | null;
+
+/** Upsert a returned row into a local list: same id → replace, else append. */
+function mergeById<T extends { id: string }>(list: T[], row: T): T[] {
+  return list.some((x) => x.id === row.id)
+    ? list.map((x) => (x.id === row.id ? row : x))
+    : [...list, row];
+}
+
+/** Role picker: all four D1 values are visible; owner renders disabled because a
+ *  membership row can never grant it — the request body only carries the other three. */
+function RolePicker({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: SiteRole;
+  onChange: (r: SiteRole) => void;
+  disabled?: boolean;
+}) {
+  const t = useT();
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {ROLES.map((r) => (
+        <button
+          key={r}
+          type="button"
+          disabled={disabled || r === 'owner'}
+          title={r === 'owner' ? t('sites.role.ownerHint') : t(`sites.role.${r}.desc`)}
+          onClick={() => onChange(r)}
+          className={`rounded-field border px-2.5 py-1 text-[11px] font-semibold disabled:cursor-not-allowed disabled:opacity-50 ${
+            value === r
+              ? 'border-tide-300 bg-tide-50 text-tide-700'
+              : 'border-ink-200 bg-white text-ink-600 hover:border-tide-300 hover:text-tide-700'
+          }`}
+        >
+          {t(`sites.role.${r}.label`)}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 export function SiteCard({
   site,
@@ -55,6 +102,16 @@ export function SiteCard({
   const [busy, setBusy] = useState(false);
   const [versions, setVersions] = useState<VersionsOut | null>(null);
   const [versionsLoading, setVersionsLoading] = useState(false);
+  const [members, setMembers] = useState<SiteMember[] | null>(null);
+  const [membersLoading, setMembersLoading] = useState(false);
+  const [membersFailed, setMembersFailed] = useState(false);
+  const [memberHandle, setMemberHandle] = useState('');
+  const [memberRole, setMemberRole] = useState<SiteRole>('editor');
+  const [grants, setGrants] = useState<GroupGrant[] | null>(null);
+  const [grantsLoading, setGrantsLoading] = useState(false);
+  const [grantsFailed, setGrantsFailed] = useState(false);
+  const [grantGroup, setGrantGroup] = useState('');
+  const [grantRole, setGrantRole] = useState<SiteRole>('editor');
 
   const remaining =
     site.visibility === 'public' && site.public_expires_at
@@ -78,6 +135,30 @@ export function SiteCard({
         .then(setVersions)
         .catch((e) => toastError(e, t('sites.toast.loadVersionsFailed')))
         .finally(() => setVersionsLoading(false));
+    }
+    if (p === 'members' && panel !== 'members') {
+      setMembersLoading(true);
+      setMembersFailed(false);
+      void api
+        .listMembers(site.slug)
+        .then((r) => setMembers(r.members))
+        .catch((e) => {
+          setMembersFailed(true);
+          toastError(e, t('sites.toast.loadMembersFailed'));
+        })
+        .finally(() => setMembersLoading(false));
+    }
+    if (p === 'grants' && panel !== 'grants') {
+      setGrantsLoading(true);
+      setGrantsFailed(false);
+      void api
+        .listGroupGrants(site.slug)
+        .then((r) => setGrants(r.grants))
+        .catch((e) => {
+          setGrantsFailed(true);
+          toastError(e, t('sites.toast.loadGrantsFailed'));
+        })
+        .finally(() => setGrantsLoading(false));
     }
   }
 
@@ -153,6 +234,56 @@ export function SiteCard({
         upsertSite(updated);
         setPanel(null);
         toast(t('sites.toast.rolledBack'));
+      },
+    );
+  }
+
+  // Members / group grants: both PUTs upsert in place (same body re-adds a deleted
+  // row), which is why the remove buttons carry no confirm dialog. Adds are gated
+  // on the list load: the load's wholesale setMembers would otherwise wipe a row
+  // added while the fetch was still in flight.
+  function addMember() {
+    const handle = memberHandle.trim().replace(/^@+/, '');
+    if (!handle || membersLoading) return;
+    void run(
+      () => api.putMember(site.slug, { handle, role: memberRole }),
+      (m) => {
+        setMembers((prev) => mergeById(prev ?? [], m));
+        setMemberHandle('');
+        toast(t('sites.toast.memberSaved'));
+      },
+    );
+  }
+
+  function removeMember(id: string) {
+    void run(
+      () => api.deleteMember(site.slug, id),
+      () => {
+        setMembers((prev) => (prev ?? []).filter((x) => x.id !== id));
+        toast(t('sites.toast.memberRemoved'));
+      },
+    );
+  }
+
+  function addGrant() {
+    const groupName = grantGroup.trim();
+    if (!groupName || grantsLoading) return;
+    void run(
+      () => api.putGroupGrant(site.slug, { group_name: groupName, role: grantRole }),
+      (g) => {
+        setGrants((prev) => mergeById(prev ?? [], g));
+        setGrantGroup('');
+        toast(t('sites.toast.grantSaved'));
+      },
+    );
+  }
+
+  function removeGrant(id: string) {
+    void run(
+      () => api.deleteGroupGrant(site.slug, id),
+      () => {
+        setGrants((prev) => (prev ?? []).filter((x) => x.id !== id));
+        toast(t('sites.toast.grantRemoved'));
       },
     );
   }
@@ -372,6 +503,24 @@ export function SiteCard({
             </button>
             <button
               type="button"
+              className={`btn-ghost !px-2.5 !py-1.5 !text-xs ${panel === 'members' ? '!border-tide-300 !text-tide-700' : ''}`}
+              onClick={() => togglePanel('members')}
+              disabled={busy}
+            >
+              <Users className="h-3.5 w-3.5" />
+              {t('sites.action.members')}
+            </button>
+            <button
+              type="button"
+              className={`btn-ghost !px-2.5 !py-1.5 !text-xs ${panel === 'grants' ? '!border-tide-300 !text-tide-700' : ''}`}
+              onClick={() => togglePanel('grants')}
+              disabled={busy}
+            >
+              <UsersRound className="h-3.5 w-3.5" />
+              {t('sites.action.grants')}
+            </button>
+            <button
+              type="button"
               className="btn-danger-ghost ml-auto !px-2.5 !py-1.5 !text-xs"
               onClick={() => void remove()}
               disabled={busy}
@@ -539,6 +688,142 @@ export function SiteCard({
                   {t('sites.versions.keepNote', { n: me.limits.keep_versions })}
                 </p>
               )}
+            </div>
+          )}
+
+          {/* ── 面板:成员(owner-only) ── */}
+          {panel === 'members' && (
+            <div className="mt-3 rounded-panel border border-ink-200 bg-ink-50 p-3 animate-fade-up">
+              <div className="text-xs font-semibold text-ink-500">{t('sites.members.heading')}</div>
+              {membersLoading ? (
+                <div className="flex items-center gap-2 py-2 text-xs text-ink-400">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" /> {t('common.loading')}
+                </div>
+              ) : membersFailed ? (
+                <div className="py-2 text-xs text-ink-400">
+                  {t('sites.toast.loadMembersFailed')}
+                </div>
+              ) : members && members.length > 0 ? (
+                <ul className="mt-2 space-y-1.5">
+                  {members.map((m) => (
+                    <li
+                      key={m.id}
+                      className="flex items-center justify-between gap-2 rounded-field bg-white px-2.5 py-2 ring-1 ring-ink-200"
+                    >
+                      <span className="min-w-0 truncate font-mono text-xs text-ink-700">
+                        @{m.handle}
+                      </span>
+                      <span className="flex shrink-0 items-center gap-1.5">
+                        <span className="rounded-full bg-tide-50 px-2 py-0.5 text-[11px] font-semibold text-tide-700 ring-1 ring-tide-200">
+                          {t(`sites.role.${m.role}.label`)}
+                        </span>
+                        <button
+                          type="button"
+                          title={t('sites.members.remove')}
+                          className="rounded-chip p-1 text-ink-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-50"
+                          disabled={busy}
+                          onClick={() => removeMember(m.id)}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="mt-2 py-2 text-xs text-ink-400">{t('sites.members.empty')}</div>
+              )}
+              <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                <input
+                  className="input !w-40 !py-1.5 !text-xs"
+                  placeholder={t('sites.members.handlePlaceholder')}
+                  maxLength={32}
+                  value={memberHandle}
+                  onChange={(e) => setMemberHandle(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && addMember()}
+                />
+                <RolePicker
+                  value={memberRole}
+                  onChange={setMemberRole}
+                  disabled={busy || membersLoading}
+                />
+                <button
+                  type="button"
+                  className="btn-primary !px-2.5 !py-1.5 !text-xs"
+                  disabled={busy || membersLoading || !memberHandle.trim()}
+                  onClick={addMember}
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  {t('sites.members.add')}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ── 面板:组授予(owner-only) ── */}
+          {panel === 'grants' && (
+            <div className="mt-3 rounded-panel border border-ink-200 bg-ink-50 p-3 animate-fade-up">
+              <div className="text-xs font-semibold text-ink-500">{t('sites.grants.heading')}</div>
+              {grantsLoading ? (
+                <div className="flex items-center gap-2 py-2 text-xs text-ink-400">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" /> {t('common.loading')}
+                </div>
+              ) : grantsFailed ? (
+                <div className="py-2 text-xs text-ink-400">{t('sites.toast.loadGrantsFailed')}</div>
+              ) : grants && grants.length > 0 ? (
+                <ul className="mt-2 space-y-1.5">
+                  {grants.map((g) => (
+                    <li
+                      key={g.id}
+                      className="flex items-center justify-between gap-2 rounded-field bg-white px-2.5 py-2 ring-1 ring-ink-200"
+                    >
+                      <span className="min-w-0 truncate font-mono text-xs text-ink-700">
+                        {g.group_name}
+                      </span>
+                      <span className="flex shrink-0 items-center gap-1.5">
+                        <span className="rounded-full bg-tide-50 px-2 py-0.5 text-[11px] font-semibold text-tide-700 ring-1 ring-tide-200">
+                          {t(`sites.role.${g.role}.label`)}
+                        </span>
+                        <button
+                          type="button"
+                          title={t('sites.grants.remove')}
+                          className="rounded-chip p-1 text-ink-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-50"
+                          disabled={busy}
+                          onClick={() => removeGrant(g.id)}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="mt-2 py-2 text-xs text-ink-400">{t('sites.grants.empty')}</div>
+              )}
+              <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                <input
+                  className="input !w-40 !py-1.5 !text-xs"
+                  placeholder={t('sites.grants.groupPlaceholder')}
+                  maxLength={64}
+                  value={grantGroup}
+                  onChange={(e) => setGrantGroup(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && addGrant()}
+                />
+                <RolePicker
+                  value={grantRole}
+                  onChange={setGrantRole}
+                  disabled={busy || grantsLoading}
+                />
+                <button
+                  type="button"
+                  className="btn-primary !px-2.5 !py-1.5 !text-xs"
+                  disabled={busy || grantsLoading || !grantGroup.trim()}
+                  onClick={addGrant}
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  {t('sites.grants.add')}
+                </button>
+              </div>
             </div>
           )}
         </div>
