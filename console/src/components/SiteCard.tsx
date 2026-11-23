@@ -735,9 +735,10 @@ export function SiteCard({
               )}
               <div className="mt-2 flex flex-wrap items-center gap-1.5">
                 <input
-                  className="input !w-40 !py-1.5 !text-xs"
+                  className="input !w-40 !py-1.5 !text-xs disabled:cursor-not-allowed disabled:opacity-50"
                   placeholder={t('sites.members.handlePlaceholder')}
                   maxLength={32}
+                  disabled={busy || membersLoading}
                   value={memberHandle}
                   onChange={(e) => setMemberHandle(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && addMember()}
@@ -802,9 +803,10 @@ export function SiteCard({
               )}
               <div className="mt-2 flex flex-wrap items-center gap-1.5">
                 <input
-                  className="input !w-40 !py-1.5 !text-xs"
+                  className="input !w-40 !py-1.5 !text-xs disabled:cursor-not-allowed disabled:opacity-50"
                   placeholder={t('sites.grants.groupPlaceholder')}
                   maxLength={64}
+                  disabled={busy || grantsLoading}
                   value={grantGroup}
                   onChange={(e) => setGrantGroup(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && addGrant()}
