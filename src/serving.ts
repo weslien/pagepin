@@ -40,6 +40,7 @@ import { jsonError, localeOf } from './i18n/locale.js';
 import { effectiveSiteAccessMode } from './instance-settings.js';
 import type { Plane } from './auth/sessions.js';
 import {
+  readIdTokenCookie,
   readSession,
   renewalCookieHeaders,
   sessionNeedsRenewal,
@@ -930,7 +931,8 @@ export function makeServingRoutes(deps: AppDeps, opts: ServingOptions = {}): Hon
         if ((c.req.header('accept') ?? '').includes('text/html')) {
           c.set('renewCookies', [
             ...(c.get('renewCookies') ?? []),
-            ...(await renewalCookieHeaders(cfg, claims)),
+            // Slide the RP-logout hint with the renewed session (single mode renews the session cookie here).
+            ...(await renewalCookieHeaders(cfg, claims, readIdTokenCookie(c))),
           ]);
         }
       }
