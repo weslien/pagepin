@@ -820,6 +820,21 @@ test('members mode serving: share-guest redeem still serves and injects (guestCo
   assert.ok(html.includes('/_pagepin/comments.js'), 'guest keeps the overlay under guestComments');
 });
 
+test('members mode serving: a logged-in share redeemer keeps the overlay (pass-2 regression)', async () => {
+  const s = await setup();
+  const shareCookie = await redeemShareGuest(s.app, s.alice);
+  await setMode(s, 'members');
+  // Dual identity: valid viewer session + live share session. The share facet must not be
+  // shadowed by the membership check on the logged-in facet.
+  const page = await contentFetch(s.app, 'alice', 'demo', `${s.carol}; ${shareCookie}`);
+  assert.equal(page.status, 200, 'share session serves the logged-in non-member in members mode');
+  const html = await page.text();
+  assert.ok(html.includes('Hello Secret'), 'dual-identity viewer sees content');
+  assert.ok(html.includes('/_pagepin/comments.js'), 'dual-identity viewer keeps the share overlay');
+  // The logged-in facet alone still narrows: same viewer without the share cookie is 403.
+  assert.equal((await contentFetch(s.app, 'alice', 'demo', s.carol)).status, 403);
+});
+
 test('members mode serving: public window serves everyone; logged-in non-member sees content but no overlay', async () => {
   const s = await setup();
   await addMember(s.db, s.demoId, 'u-dan', 'commenter');

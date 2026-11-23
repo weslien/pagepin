@@ -1001,9 +1001,11 @@ export function makeServingRoutes(deps: AppDeps, opts: ServingOptions = {}): Hon
     // W4: in members mode, the signed-in inject narrows to commenter and up (viewerRole below).
     const canInject =
       site.commentsEnabled &&
-      (viewerActive
-        ? !membersMode || roleAtLeast(viewerRole, 'commenter')
-        : shareViewer && site.guestComments);
+      // W4: two identity facets — a share session injects under guestComments (pre-W4 rule,
+      // unchanged) even when the same visitor is also logged in; the logged-in facet narrows
+      // to commenter and up in members mode. Pass-2 fix: the two facets were shadowed here.
+      ((shareViewer && site.guestComments) ||
+        (viewerActive && (!membersMode || roleAtLeast(viewerRole, 'commenter'))));
     // 试用站(匿名 drop):HTML 一律注入右下角缎带(到期倒计时 + 引导注册保留)
     const isTrial = site.expiresAt !== null;
 
