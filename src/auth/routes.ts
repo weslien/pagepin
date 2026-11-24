@@ -22,6 +22,7 @@ import { writtenCount } from '../db/ops.js';
 import { effectiveRegistrationMode } from '../instance-settings.js';
 import { t, type Locale } from '../i18n/index.js';
 import { jsonError, localeOf } from '../i18n/locale.js';
+import { canPublish } from '../api/deps.js';
 import type { AppDeps, AppEnv } from '../types.js';
 import { canonicalEmail, nowIso, uuid, validEmail } from '../util.js';
 import {
@@ -94,11 +95,13 @@ function safeNext(raw: string | null | undefined): string {
 /** 首登未设 handle 的联合登录落地改道:设 handle 的引导页只存在于 console SPA。
  *  从登录墙(分享链接等)进来的用户回跳落在内容页,永远见不到引导页 → handle 一直是 NULL。
  *  回跳非 console 根、非设备激活页时,改到 console 声明页并带 ?next= 原目的地,认领后 SPA 送回。
+ *  仅当账号真能认领(canPublish 过关)才改道 —— 会被 VerifyEmailGate 挡死的账号改道过去是死胡同,不如留在原落地。
  *  /activate(设备授权)刻意不设 handle 也能走,不改道。
  *  shortcut: dual 模式 view 平面会话在 console 域无效,要先加跨面会话接力;单域部署才改道。 */
-function claimNext(cfg: Config, user: { handle: string | null }, next: string): string {
-  if (user.handle !== null || cfg.mode !== 'single') return next;
-  if (next === '/' || next.startsWith('/activate')) return next;
+async function claimNext(deps: AppDeps, cfg: Config, user: UserRow, next: string): Promise<string> {
+  if (cfg.mode !== 'single' || user.handle !== null) return next;
+  if (next === '/' || next === '/activate' || next.startsWith('/activate?')) return next;
+  if (!(await canPublish(deps, user))) return next;
   return `/?next=${encodeURIComponent(next)}`;
 }
 
@@ -706,7 +709,7 @@ export function makeAuthRoutes(deps: AppDeps, plane: Plane): Hono<AppEnv> {
     // Keep the IdP id_token as the RP-logout hint; logout sends it back as id_token_hint.
     if (info.idToken) setIdTokenCookie(c, cfg, info.idToken);
     return c.redirect(
-      claimNext(cfg, user, safeNext(typeof st.nxt === 'string' ? st.nxt : null)),
+      await claimNext(deps, cfg, user, safeNext(typeof st.nxt === 'string' ? st.nxt : null)),
       302,
     );
   });
@@ -781,7 +784,7 @@ export function makeAuthRoutes(deps: AppDeps, plane: Plane): Hono<AppEnv> {
     });
     if (user.disabled) return jsonError(c, 403, 'auth.account.disabled');
     await setLoginCookies(c, cfg, plane, user.id, user.handle, user.sessionEpoch);
-    return c.redirect(claimNext(cfg, user, back), 302);
+    return c.redirect(await claimNext(deps, cfg, user, back), 302);
   });
 
   // ---- 跨域登录接力(仅 dual 模式)—— console 会话换内容域 pp_view,免二次 OAuth ----

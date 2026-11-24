@@ -16,8 +16,10 @@ import { loadConfig } from '../src/config.js';
 import { makeAuthRoutes } from '../src/auth/routes.js';
 import { makeAuthMiddleware } from '../src/api/deps.js';
 import { makeMeRoutes } from '../src/api/me.js';
+import { users } from '../src/db/index.js';
+import { nowIso } from '../src/util.js';
 import { FsStorage } from '../src/storage/fs.js';
-import type { AppDeps, AppEnv } from '../src/types.js';
+import type { AppDeps, AppEnv, Mailer } from '../src/types.js';
 import { makeTestDb } from './helpers/db.js';
 
 const ISSUER = 'https://idp.test';
@@ -81,12 +83,12 @@ function baseEnv(): Record<string, string> {
   };
 }
 
-async function setup(env: Record<string, string> = {}) {
+async function setup(env: Record<string, string> = {}, mailer?: Mailer) {
   const dir = await mkdtemp(join(tmpdir(), 'pagepin-handle-claim-'));
   const storage = new FsStorage(dir);
   const db = await makeTestDb();
   const cfg = loadConfig({ ...baseEnv(), ...env });
-  const deps: AppDeps = { config: cfg, db, storage };
+  const deps: AppDeps = { config: cfg, db, storage, mailer };
   const app = new Hono<AppEnv>();
   app.route('/', makeAuthRoutes(deps, 'session'));
   app.route('/', makeMeRoutes(deps, makeAuthMiddleware(deps)));
@@ -212,6 +214,50 @@ test('dual mode keeps the landing (no cross-plane detour yet)', async () => {
     PAGEPIN_CONTENT_HOST: 'content.test',
   });
   const restore = stubFetch(idpRoutes());
+  try {
+    const resp = await oidcLogin(app, '/p/alice/demo/');
+    assert.equal(resp.status, 302);
+    assert.equal(resp.headers.get('location'), '/p/alice/demo/');
+  } finally {
+    restore();
+  }
+});
+
+test('hostile next sanitizes to the console root before any detour', async () => {
+  const { app } = await setup();
+  const restore = stubFetch(idpRoutes());
+  try {
+    for (const evil of ['//evil.example/x', '/\\\\evil.example/x', 'javascript:alert(1)']) {
+      const resp = await oidcLogin(app, evil);
+      assert.equal(resp.status, 302);
+      assert.equal(resp.headers.get('location'), '/', 'safeNext must reject the detour input');
+    }
+  } finally {
+    restore();
+  }
+});
+
+test('the exemption is the device activation page itself, not the /activate prefix', async () => {
+  const { app } = await setup();
+  const restore = stubFetch(idpRoutes());
+  try {
+    const resp = await oidcLogin(app, '/activates');
+    assert.equal(resp.status, 302);
+    assert.equal(resp.headers.get('location'), `/?next=${encodeURIComponent('/activates')}`);
+  } finally {
+    restore();
+  }
+});
+
+test('a claim-blocked account keeps its original landing (no VerifyEmailGate dead end)', async () => {
+  const mailer: Mailer = { send: async () => {} };
+  const { app, db } = await setup({}, mailer);
+  // 首个账号会自动成为 admin(见 upsert 的 n=== 0 规则),先占位让联合登录落到非管理员账号。
+  await db.insert(users).values({ id: 'u-seed', createdAt: nowIso() });
+  const restore = stubFetch({
+    ...idpRoutes(),
+    [IDP.userinfo]: { ...USERINFO, email_verified: false },
+  });
   try {
     const resp = await oidcLogin(app, '/p/alice/demo/');
     assert.equal(resp.status, 302);
