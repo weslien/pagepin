@@ -127,6 +127,13 @@ export function HandleSetup() {
       const { handle: confirmed } = await api.setHandle(handle);
       if (me) setMe({ ...me, handle: confirmed, needs_handle: false });
       toast(t('auth.handleSet', { handle: confirmed }));
+      // 联合登录落地被服务端改道来了这里(?next= 带原目的地):认领完送回原页面。
+      // 与后端 safeNext 同规:仅站内相对路径,拒 // 与反斜杠。
+      const back = new URLSearchParams(location.search).get('next');
+      if (back && back.startsWith('/') && !back.startsWith('//') && !back.includes('\\')) {
+        location.href = back;
+        return;
+      }
       void refreshSites();
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {

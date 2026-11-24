@@ -228,7 +228,8 @@ test('fake-IdP login loop plants the httpOnly hint; logout ends both sessions', 
       ),
     );
     assert.equal(cb.status, 302);
-    assert.equal(cb.headers.get('location'), '/after');
+    // handle=null 的联邦登录:落地被改道到声明页(?next= 带原目的地)—— 见 claimNext。
+    assert.equal(cb.headers.get('location'), '/?next=%2Fafter');
     assert.equal((await db.select().from(users)).length, 1, 'the federated login created the user');
     const loginCookies = setCookies(cb);
     const hint = loginCookies.find((v) => v.startsWith(`${ID_TOKEN_COOKIE}=`));
