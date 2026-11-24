@@ -38,7 +38,7 @@ export function Login() {
     };
   }, []);
 
-  // 只允许站内相对路径,防 open redirect(与服务端同一份校验,src/lib/safe-next)
+  // 只允许站内相对路径,防 open redirect(与服务端同一份校验,console/src/lib/safe-next)
   const next = safeNext(new URLSearchParams(location.search).get('next'));
 
   useEffect(() => {

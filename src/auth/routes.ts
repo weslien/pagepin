@@ -175,7 +175,9 @@ function socialButtonsHtml(social: string[], next: string, locale: Locale): stri
 /** 双域内容平面的 password 登录页:复用 brand-gate 品牌壳(与私有门页同一视觉),自包含、
  * 无控制台资产依赖。提交走内联 fetch → JSON,失败行内报错(不再把 401 的 {detail} 甩成裸 JSON 页);
  * 成功跳回 next;needs_handle(handle 未设,同 OIDC 改道判定)先绕 console 声明页再回跳。
- * JS 不可用时 <form> 仍原生 POST 兜底(成功 302 改道同判,失败退化为旧的 JSON 页)。 */
+ *  JS 不可用时 <form> 仍原生 POST 兜底(成功 302 改道同判,失败退化为旧的 JSON 页)。
+ *  shortcut: 改道只在单域生效(claimNext),而本页只在双域渲染 —— 这段 needs_handle
+ *  分支当下恒不触发,留作跨面会话接力(见 claimNext 的 shortcut 注释)落地后的接驳点。 */
 function loginPage(
   next: string,
   social: string[],

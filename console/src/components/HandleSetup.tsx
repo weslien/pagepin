@@ -129,7 +129,7 @@ export function HandleSetup() {
       if (me) setMe({ ...me, handle: confirmed, needs_handle: false });
       toast(t('auth.handleSet', { handle: confirmed }));
       // 联合登录落地被服务端改道来了这里(?next= 带原目的地):认领完送回原页面。
-      // 站内相对路径校验与服务端同一份(src/lib/safe-next),拒 // 与反斜杠。
+      // 站内相对路径校验与服务端同一份(console/src/lib/safe-next),拒 // 与反斜杠。
       const back = new URLSearchParams(location.search).get('next');
       if (isSafeNext(back)) {
         location.href = back;

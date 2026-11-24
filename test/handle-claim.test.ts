@@ -463,6 +463,26 @@ test('open signup answers needs_handle for its landing too', async () => {
   assert.equal(await needsHandleOf(resp), true);
 });
 
+test('open signup with a mailer keeps the flag false (unverified account cannot claim)', async () => {
+  const mailer: Mailer = { send: async () => {} };
+  const { app, db } = await pwSetup({}, mailer);
+  // 占位使注册者不是首账号 admin(canPublish 对 admin 恒真,会绕过「未验证即禁认领」的判定)
+  await db.insert(users).values({ id: 'u-seed', createdAt: nowIso() });
+  const resp = await app.fetch(
+    new Request('http://localhost:8000/auth/signup', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'fresh@example.com', password: PW, next: '/p/alice/demo/' }),
+    }),
+  );
+  assert.equal(resp.status, 200);
+  assert.equal(
+    await needsHandleOf(resp),
+    false,
+    'fresh unverified account + mailer → VerifyEmailGate first, no detour',
+  );
+});
+
 test('hostile next values sanitize before the JSON flag or redirect is composed', async () => {
   const { app, db } = await pwSetup();
   await insertPwUser(db, 'pw@example.com');

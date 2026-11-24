@@ -66,7 +66,7 @@ export function redirectToLogin(): void {
   location.href = loginPath() + '?next=' + encodeURIComponent(next || '/');
 }
 
-/** 登录/注册共用:JSON POST,不带 CSRF 头（登录前没有 csrf cookie，服务端这几个端点不校验）。
+/** 登录/注册共用：JSON POST，不带 CSRF 头（登录前没有 csrf cookie，服务端这几个端点不校验）。
  *  成功时把响应体解析回传（/auth/password 的 needs_handle 等标志由调用方各取所需）。 */
 async function authPost(path: string, body: Record<string, unknown>): Promise<unknown> {
   const res = await fetch(path, {
