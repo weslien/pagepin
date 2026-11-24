@@ -16,10 +16,12 @@ import { loadConfig } from '../src/config.js';
 import { makeAuthRoutes } from '../src/auth/routes.js';
 import { makeAuthMiddleware } from '../src/api/deps.js';
 import { makeMeRoutes } from '../src/api/me.js';
+import { hashPassword } from '../src/auth/password.js';
 import { users } from '../src/db/index.js';
-import { nowIso } from '../src/util.js';
+import { canonicalEmail, nowIso, uuid } from '../src/util.js';
 import { FsStorage } from '../src/storage/fs.js';
 import type { AppDeps, AppEnv, Mailer } from '../src/types.js';
+import { isSafeNext, safeNext } from '../console/src/lib/safe-next.js';
 import { makeTestDb } from './helpers/db.js';
 
 const ISSUER = 'https://idp.test';
@@ -306,4 +308,193 @@ test('social login detours too: google callback sends a handle-null user to the 
   } finally {
     restore();
   }
+});
+
+// ---- password 登录/注册:needs_handle 与 OIDC 改道对齐 ---------------------------------
+
+const PW = 'pw-secret-123';
+
+/** 直接落一个可登录的 password 账号(绕过注册开关,与 invite 流解耦)。 */
+async function insertPwUser(
+  db: AppDeps['db'],
+  email: string,
+  opts: { handle?: string | null; emailVerified?: boolean } = {},
+): Promise<void> {
+  await db.insert(users).values({
+    id: uuid(),
+    email,
+    canonicalEmail: canonicalEmail(email)!,
+    passwordHash: await hashPassword(PW),
+    emailVerified: opts.emailVerified ?? true,
+    handle: opts.handle ?? null,
+    createdAt: nowIso(),
+  });
+}
+
+function pwSetup(env: Record<string, string> = {}, mailer?: Mailer) {
+  return setup({ PAGEPIN_AUTH_MODE: 'password', ...env }, mailer);
+}
+
+/** /auth/password 双格式提交:JSON(内容域登录墙与 console SPA)或表单(无 JS 兜底)。 */
+function pwPost(
+  app: Hono<AppEnv>,
+  body: Record<string, unknown>,
+  json: boolean,
+): Promise<Response> {
+  const headers = json
+    ? { 'content-type': 'application/json' }
+    : { 'content-type': 'application/x-www-form-urlencoded' };
+  const payload = json
+    ? JSON.stringify(body)
+    : new URLSearchParams(body as Record<string, string>).toString();
+  return Promise.resolve(
+    app.fetch(
+      new Request('http://localhost:8000/auth/password', {
+        method: 'POST',
+        headers,
+        body: payload,
+      }),
+    ),
+  );
+}
+
+function needsHandleOf(resp: Response): Promise<boolean> {
+  return resp.json().then((j: { needs_handle?: boolean }) => j.needs_handle === true);
+}
+
+test('password JSON login answers needs_handle instead of silently parking a handle-null user', async () => {
+  const { app, db } = await pwSetup();
+  await insertPwUser(db, 'pw@example.com');
+  const resp = await pwPost(
+    app,
+    { email: 'pw@example.com', password: PW, next: '/p/alice/demo/' },
+    true,
+  );
+  assert.equal(resp.status, 200);
+  const out = (await resp.json()) as { ok: boolean; needs_handle: boolean };
+  assert.equal(out.ok, true);
+  assert.equal(
+    out.needs_handle,
+    true,
+    'handle-null user must be told to detour through the claim page',
+  );
+});
+
+test('password form login detours like the OIDC callbacks (redirect parity)', async () => {
+  const { app, db } = await pwSetup();
+  await insertPwUser(db, 'pw@example.com');
+  const resp = await pwPost(
+    app,
+    { email: 'pw@example.com', password: PW, next: '/p/alice/demo/' },
+    false,
+  );
+  assert.equal(resp.status, 302);
+  assert.equal(resp.headers.get('location'), `/?next=${encodeURIComponent('/p/alice/demo/')}`);
+});
+
+test('password login needs_handle clears once the handle is claimed', async () => {
+  const { app, db } = await pwSetup();
+  await insertPwUser(db, 'pw@example.com');
+  const first = await pwPost(
+    app,
+    { email: 'pw@example.com', password: PW, next: '/p/alice/demo/' },
+    true,
+  );
+  assert.equal(await needsHandleOf(first), true);
+  const claimed = await claimHandle(app, cookiePair(first), 'pwuser');
+  assert.equal(claimed.status, 200);
+  const second = await pwPost(
+    app,
+    { email: 'pw@example.com', password: PW, next: '/p/alice/demo/' },
+    true,
+  );
+  assert.equal(
+    await needsHandleOf(second),
+    false,
+    'claimed account goes straight to its destination',
+  );
+});
+
+test('exempted nexts stay direct for password login too', async () => {
+  const { app, db } = await pwSetup();
+  await insertPwUser(db, 'pw@example.com');
+  for (const next of ['/', '/activate?user_code=ABCD-EFGH', undefined]) {
+    const body: Record<string, unknown> = { email: 'pw@example.com', password: PW };
+    if (next) body.next = next;
+    const resp = await pwPost(app, body, true);
+    assert.equal(resp.status, 200);
+    assert.equal(
+      await needsHandleOf(resp),
+      false,
+      `next=${String(next)} is exempt from the detour`,
+    );
+  }
+});
+
+test('a claim-blocked password account keeps its landing and flag stays false', async () => {
+  const mailer: Mailer = { send: async () => {} };
+  const { app, db } = await pwSetup({}, mailer);
+  await insertPwUser(db, 'pw@example.com', { emailVerified: false });
+  const json = await pwPost(
+    app,
+    { email: 'pw@example.com', password: PW, next: '/p/alice/demo/' },
+    true,
+  );
+  assert.equal(await needsHandleOf(json), false, 'VerifyEmailGate would dead-end the detour');
+  const form = await pwPost(
+    app,
+    { email: 'pw@example.com', password: PW, next: '/p/alice/demo/' },
+    false,
+  );
+  assert.equal(form.status, 302);
+  assert.equal(form.headers.get('location'), '/p/alice/demo/');
+});
+
+test('open signup answers needs_handle for its landing too', async () => {
+  const { app } = await pwSetup();
+  const resp = await app.fetch(
+    new Request('http://localhost:8000/auth/signup', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'fresh@example.com', password: PW, next: '/p/alice/demo/' }),
+    }),
+  );
+  assert.equal(resp.status, 200);
+  assert.equal(await needsHandleOf(resp), true);
+});
+
+test('hostile next values sanitize before the JSON flag or redirect is composed', async () => {
+  const { app, db } = await pwSetup();
+  await insertPwUser(db, 'pw@example.com');
+  const bs = String.fromCharCode(92);
+  for (const evil of ['//evil.example/x', '/' + bs + 'evil.example/x', 'javascript:alert(1)']) {
+    const json = await pwPost(app, { email: 'pw@example.com', password: PW, next: evil }, true);
+    assert.equal(await needsHandleOf(json), false, `safeNext must sanitize ${evil}`);
+    const form = await pwPost(app, { email: 'pw@example.com', password: PW, next: evil }, false);
+    assert.equal(form.status, 302);
+    assert.equal(form.headers.get('location'), '/');
+  }
+});
+
+test('shared isSafeNext pins the exact rule all three call sites inherit', () => {
+  const bs = String.fromCharCode(92);
+  const bad = [
+    '//evil.example/x',
+    '/' + bs + 'evil.example/x',
+    '/' + bs + bs + 'evil',
+    'javascript:alert(1)',
+    '',
+    null,
+    undefined,
+  ];
+  for (const value of bad)
+    assert.equal(isSafeNext(value), false, `must reject ${JSON.stringify(value)}`);
+  for (const good of ['/', '/p/alice/demo/', '/activate?user_code=X', '/?next=/p/a/']) {
+    assert.equal(isSafeNext(good), true);
+    assert.equal(safeNext(good), good);
+  }
+  assert.equal(safeNext(''), '/');
+  assert.equal(safeNext(null), '/');
+  assert.equal(safeNext('//evil.example/x'), '/');
+  assert.equal(safeNext('/' + bs + 'evil'), '/');
 });

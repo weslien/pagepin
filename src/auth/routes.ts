@@ -23,6 +23,7 @@ import { effectiveRegistrationMode } from '../instance-settings.js';
 import { t, type Locale } from '../i18n/index.js';
 import { jsonError, localeOf } from '../i18n/locale.js';
 import { canPublish } from '../api/deps.js';
+import { safeNext } from '../../console/src/lib/safe-next.js';
 import type { AppDeps, AppEnv } from '../types.js';
 import { canonicalEmail, nowIso, uuid, validEmail } from '../util.js';
 import {
@@ -83,13 +84,6 @@ async function stateDecode(secret: string, state: string): Promise<Record<string
   } catch {
     return null;
   }
-}
-
-/** 只允许站内相对路径,防 open redirect。
- * 拒 //evil(协议相对)、javascript:(无前导 /),以及 /\evil(浏览器把反斜杠归一成 / → //evil)。 */
-function safeNext(raw: string | null | undefined): string {
-  if (raw && raw.startsWith('/') && !raw.startsWith('//') && !raw.includes('\\')) return raw;
-  return '/';
 }
 
 /** 首登未设 handle 的联合登录落地改道:设 handle 的引导页只存在于 console SPA。
@@ -180,7 +174,8 @@ function socialButtonsHtml(social: string[], next: string, locale: Locale): stri
 
 /** 双域内容平面的 password 登录页:复用 brand-gate 品牌壳(与私有门页同一视觉),自包含、
  * 无控制台资产依赖。提交走内联 fetch → JSON,失败行内报错(不再把 401 的 {detail} 甩成裸 JSON 页);
- * 成功跳回 next。JS 不可用时 <form> 仍原生 POST 兜底(成功 302 回跳,失败退化为旧的 JSON 页)。 */
+ * 成功跳回 next;needs_handle(handle 未设,同 OIDC 改道判定)先绕 console 声明页再回跳。
+ * JS 不可用时 <form> 仍原生 POST 兜底(成功 302 改道同判,失败退化为旧的 JSON 页)。 */
 function loginPage(
   next: string,
   social: string[],
@@ -231,7 +226,7 @@ ${tsScript}<div class="foot">${escapeHtml(t(locale, 'auth.html.hostedOn'))} <spa
     fetch('/auth/password',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(p)})
       .then(function(r){return r.json().catch(function(){return {};}).then(function(j){return {ok:r.ok,j:j};});})
       .then(function(res){
-        if(res.ok){window.location.href=p.next||'/';return;}
+        if(res.ok){window.location.href=res.j&&res.j.needs_handle?('/?next='+encodeURIComponent(p.next||'/')):(p.next||'/');return;}
         err.textContent=(res.j&&res.j.detail)||MSG_FAIL;err.hidden=false;
         btn.disabled=false;btn.textContent=MSG_BTN;
       })
@@ -610,8 +605,12 @@ export function makeAuthRoutes(deps: AppDeps, plane: Plane): Hono<AppEnv> {
     if (user.disabled) return jsonError(c, 403, 'auth.account.disabled');
     await deps.db.update(users).set({ lastLoginAt: nowIso() }).where(eq(users.id, user.id));
     await setLoginCookies(c, cfg, plane, user.id, user.handle, user.sessionEpoch);
-    if (isJson) return c.json({ ok: true });
-    return c.redirect(safeNext(body.next), 302);
+    // 与 OIDC/social 回跳同判(claimNext):handle 未设的账号先绕声明页,不再无声停在 next。
+    // JSON 客户端(内容域登录墙的内联 fetch、console SPA)不能跟 302 → 回 needs_handle 让其自行改道。
+    const next = safeNext(body.next);
+    const dest = await claimNext(deps, cfg, user, next);
+    if (isJson) return c.json({ ok: true, needs_handle: dest !== next });
+    return c.redirect(dest, 302);
   });
 
   app.post('/auth/signup', async (c) => {
@@ -676,7 +675,10 @@ export function makeAuthRoutes(deps: AppDeps, plane: Plane): Hono<AppEnv> {
       }
     }
     await setLoginCookies(c, cfg, plane, created.id, created.handle, created.sessionEpoch);
-    return c.json({ ok: true });
+    // 注册即首登,handle 必为空:同 password 登录回 needs_handle(Login?mode=signup 带 next 时 SPA 自行改道)。
+    const next = safeNext(body.next);
+    const dest = await claimNext(deps, cfg, created, next);
+    return c.json({ ok: true, needs_handle: dest !== next });
   });
 
   app.get('/auth/callback', async (c) => {

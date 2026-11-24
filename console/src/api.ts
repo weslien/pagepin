@@ -66,8 +66,9 @@ export function redirectToLogin(): void {
   location.href = loginPath() + '?next=' + encodeURIComponent(next || '/');
 }
 
-/** 登录/注册共用：JSON POST，不带 CSRF 头（登录前没有 csrf cookie，服务端这两个端点不校验） */
-async function authPost(path: string, body: Record<string, unknown>): Promise<void> {
+/** 登录/注册共用:JSON POST,不带 CSRF 头（登录前没有 csrf cookie，服务端这几个端点不校验）。
+ *  成功时把响应体解析回传（/auth/password 的 needs_handle 等标志由调用方各取所需）。 */
+async function authPost(path: string, body: Record<string, unknown>): Promise<unknown> {
   const res = await fetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -84,12 +85,22 @@ async function authPost(path: string, body: Record<string, unknown>): Promise<vo
     }
     throw new ApiError(res.status, msg);
   }
+  return res.json().catch(() => ({}));
 }
 
-export function login(email: string, password: string, turnstileToken?: string): Promise<void> {
+/** needs_handle=true:账号得先认领 handle(服务端同一套改道判定)→ 先去声明页再回 next。 */
+export type LoginOutcome = { needs_handle?: boolean };
+
+export function login(
+  email: string,
+  password: string,
+  turnstileToken?: string,
+  next?: string,
+): Promise<LoginOutcome> {
   const body: Record<string, unknown> = { email, password };
+  if (next) body.next = next;
   if (turnstileToken) body.turnstile_token = turnstileToken;
-  return authPost('/auth/password', body);
+  return authPost('/auth/password', body) as Promise<LoginOutcome>;
 }
 
 export function signup(
@@ -97,11 +108,13 @@ export function signup(
   password: string,
   displayName?: string,
   turnstileToken?: string,
-): Promise<void> {
+  next?: string,
+): Promise<LoginOutcome> {
   const body: Record<string, unknown> = { email, password };
+  if (next) body.next = next;
   if (displayName && displayName.trim()) body.display_name = displayName.trim();
   if (turnstileToken) body.turnstile_token = turnstileToken;
-  return authPost('/auth/signup', body);
+  return authPost('/auth/signup', body) as Promise<LoginOutcome>;
 }
 
 function extractDetail(body: unknown): string | null {
@@ -385,7 +398,7 @@ export async function fetchInviteInfo(
 
 /** 接受邀请建号（登录前，无 CSRF）。成功后服务端已下发会话 Cookie。
  *  email 仅当邀请未限定邮箱时由用户填写；限定邮箱的邀请忽略该值（服务端以邀请为准）。 */
-export function acceptInvite(
+export async function acceptInvite(
   token: string,
   password: string,
   opts?: { email?: string; displayName?: string },
@@ -393,7 +406,7 @@ export function acceptInvite(
   const body: Record<string, unknown> = { token, password };
   if (opts?.email && opts.email.trim()) body.email = opts.email.trim();
   if (opts?.displayName && opts.displayName.trim()) body.display_name = opts.displayName.trim();
-  return authPost('/auth/accept-invite', body);
+  await authPost('/auth/accept-invite', body);
 }
 
 export async function logout(): Promise<void> {

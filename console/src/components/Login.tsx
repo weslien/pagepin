@@ -3,6 +3,7 @@ import { Loader2, LogIn } from 'lucide-react';
 import { fetchAuthConfig, login, signup } from '../api';
 import { useT } from '../i18n';
 import type { AuthConfig } from '../types';
+import { safeNext } from '../lib/safe-next';
 import { BrandMark } from './BrandMark';
 import { OrDivider, SocialButtons } from './SocialButtons';
 import { Turnstile } from './Turnstile';
@@ -37,9 +38,8 @@ export function Login() {
     };
   }, []);
 
-  // 只允许站内相对路径,防 open redirect / javascript: URI(与服务端 safeNext 同规则)
-  const rawNext = new URLSearchParams(location.search).get('next') || '/';
-  const next = rawNext.startsWith('/') && !rawNext.startsWith('//') ? rawNext : '/';
+  // 只允许站内相对路径,防 open redirect(与服务端同一份校验,src/lib/safe-next)
+  const next = safeNext(new URLSearchParams(location.search).get('next'));
 
   useEffect(() => {
     let cancelled = false;
@@ -76,12 +76,11 @@ export function Login() {
     setSubmitting(true);
     setError(null);
     try {
-      if (wantSignup) {
-        await signup(email.trim(), password, displayName, turnstileToken);
-      } else {
-        await login(email.trim(), password, turnstileToken);
-      }
-      location.href = next;
+      const res = wantSignup
+        ? await signup(email.trim(), password, displayName, turnstileToken, next)
+        : await login(email.trim(), password, turnstileToken, next);
+      // needs_handle:账号得先认领 handle(与 OIDC 改道同判)→ 先声明页,认领后送回 next。
+      location.href = res.needs_handle ? '/?next=' + encodeURIComponent(next) : next;
     } catch (e) {
       setError(e instanceof Error ? e.message : t('auth.requestFailed'));
       setSubmitting(false);

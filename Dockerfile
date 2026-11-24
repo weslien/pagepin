@@ -39,6 +39,9 @@ COPY scripts/ scripts/
 COPY static/ static/
 COPY skills/ skills/
 COPY src/ src/
+# src/auth/routes.ts imports the shared next-validation helper that lives in the
+# console package (console/src/lib/safe-next) — tsup needs it at bundle time.
+COPY console/src/lib ./console/src/lib
 RUN pnpm gen:assets && npx tsup src/index.ts --format esm --target node22
 
 # --------------------------------------------------------------- stage: deps

@@ -4,6 +4,7 @@ import { api, ApiError } from '../api';
 import { useT } from '../i18n';
 import { useStore } from '../store';
 import { toast, toastError } from './Toast';
+import { isSafeNext } from '../lib/safe-next';
 import { HANDLE_RE } from '../types';
 
 /** 未验证邮箱(can_publish=false)时挡在 handle 之前:claim handle / 建站 / 发 token 都要求先验证。 */
@@ -128,9 +129,9 @@ export function HandleSetup() {
       if (me) setMe({ ...me, handle: confirmed, needs_handle: false });
       toast(t('auth.handleSet', { handle: confirmed }));
       // 联合登录落地被服务端改道来了这里(?next= 带原目的地):认领完送回原页面。
-      // 与后端 safeNext 同规:仅站内相对路径,拒 // 与反斜杠。
+      // 站内相对路径校验与服务端同一份(src/lib/safe-next),拒 // 与反斜杠。
       const back = new URLSearchParams(location.search).get('next');
-      if (back && back.startsWith('/') && !back.startsWith('//') && !back.includes('\\')) {
+      if (isSafeNext(back)) {
         location.href = back;
         return;
       }
