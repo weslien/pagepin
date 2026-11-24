@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Ban,
   ChevronRight,
@@ -24,7 +24,14 @@ import { confirmDanger } from './ConfirmDialog';
 import { ShareLinkDialog } from './ShareLinkDialog';
 import { copyText, formatBytes, formatRelative, formatRemaining } from '../lib/format';
 import { useStore } from '../store';
-import type { GroupGrant, SiteMember, SiteOut, SiteRole, VersionsOut } from '../types';
+import type {
+  GroupGrant,
+  SiteMember,
+  SiteOut,
+  SiteRole,
+  UserSearchResult,
+  VersionsOut,
+} from '../types';
 import { toast, toastError } from './Toast';
 
 const SHARE_HOURS = [1, 6, 24, 72, 168] as const;
@@ -107,6 +114,14 @@ export function SiteCard({
   const [membersFailed, setMembersFailed] = useState(false);
   const [memberHandle, setMemberHandle] = useState('');
   const [memberRole, setMemberRole] = useState<SiteRole>('editor');
+  const [memberResults, setMemberResults] = useState<UserSearchResult[]>([]);
+  const [memberFocused, setMemberFocused] = useState(false);
+  // 已点选项的 handle:输入框随后被填上同一文本,防抖查询须跳过这次变更,
+  // 否则下拉在点选后又弹回一个只含自己的列表。
+  const pickedHandleRef = useRef('');
+  // Escape 压下的查询:免得在途回应晚归后把刚关掉的下拉重新弹开(memberHandle 未
+  // 变,effect 不会重跑,须由 .then 侧比对丢弃)。
+  const dismissedQueryRef = useRef('');
   const [grants, setGrants] = useState<GroupGrant[] | null>(null);
   const [grantsLoading, setGrantsLoading] = useState(false);
   const [grantsFailed, setGrantsFailed] = useState(false);
@@ -254,6 +269,38 @@ export function SiteCard({
       },
     );
   }
+
+  // 加成员下拉:输入防抖 250ms 查 owner 专用的 /members/search;静默失败(搜索是
+  // 便捷层,精确 handle 手输路径保持原样)。点选项只回填 handle 文本,提交仍走 PUT。
+  function pickMemberHandle(handle: string) {
+    pickedHandleRef.current = handle;
+    setMemberHandle(handle);
+    setMemberResults([]);
+  }
+
+  useEffect(() => {
+    const q = memberHandle.trim();
+    if (q.length < 2 || q.length > 120 || pickedHandleRef.current === q) {
+      setMemberResults([]); // 退出查询区/已点选:清掉旧结果,下拉不残留上一查询的行
+      return;
+    }
+    // 上一查询晚归 → 丢弃:cancelled 在 memberHandle 变化的 cleanup 里置位
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      api
+        .searchMembers(site.slug, q)
+        .then((r) => {
+          if (!cancelled && dismissedQueryRef.current !== q) setMemberResults(r.results);
+        })
+        .catch(() => {
+          if (!cancelled) setMemberResults([]);
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [memberHandle, site.slug]);
 
   function removeMember(id: string) {
     void run(
@@ -734,15 +781,62 @@ export function SiteCard({
                 <div className="mt-2 py-2 text-xs text-ink-400">{t('sites.members.empty')}</div>
               )}
               <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                <input
-                  className="input !w-40 !py-1.5 !text-xs disabled:cursor-not-allowed disabled:opacity-50"
-                  placeholder={t('sites.members.handlePlaceholder')}
-                  maxLength={32}
-                  disabled={busy || membersLoading}
-                  value={memberHandle}
-                  onChange={(e) => setMemberHandle(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && addMember()}
-                />
+                <div className="relative">
+                  <input
+                    className="input !w-56 !py-1.5 !text-xs disabled:cursor-not-allowed disabled:opacity-50"
+                    placeholder={t('sites.members.searchPlaceholder')}
+                    disabled={busy || membersLoading}
+                    value={memberHandle}
+                    maxLength={120}
+                    onChange={(e) => {
+                      pickedHandleRef.current = '';
+                      dismissedQueryRef.current = '';
+                      setMemberHandle(e.target.value);
+                    }}
+                    onFocus={() => setMemberFocused(true)}
+                    onBlur={() => setMemberFocused(false)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape') {
+                        dismissedQueryRef.current = memberHandle.trim();
+                        // memberFocused 不动:输入框仍持有焦点,焦点位不等于"下拉开着"
+                        setMemberResults([]);
+                        return;
+                      }
+                      if (e.key !== 'Enter') return;
+                      // 下拉开着:Enter 先收下第一条建议(回填 handle;再按一次才提交)
+                      if (memberFocused && memberResults.length > 0) {
+                        pickMemberHandle(memberResults[0]!.handle);
+                      } else {
+                        addMember();
+                      }
+                    }}
+                  />
+                  {memberFocused && memberResults.length > 0 && (
+                    <ul className="absolute left-0 top-full z-20 mt-1 max-h-56 w-72 overflow-auto rounded-field border border-ink-200 bg-white py-1 shadow-lg">
+                      {memberResults.map((u) => (
+                        <li key={u.handle}>
+                          <button
+                            type="button"
+                            tabIndex={-1}
+                            className="flex w-full items-baseline gap-2 px-2.5 py-1.5 text-left hover:bg-tide-50"
+                            onPointerDown={(e) => {
+                              // 先于 blur 防下拉先消失;pointer 一并覆盖触摸
+                              e.preventDefault();
+                              pickMemberHandle(u.handle);
+                            }}
+                          >
+                            <span className="font-mono text-xs text-ink-700">@{u.handle}</span>
+                            {u.display_name && (
+                              <span className="truncate text-xs text-ink-400">
+                                {u.display_name}
+                              </span>
+                            )}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
                 <RolePicker
                   value={memberRole}
                   onChange={setMemberRole}

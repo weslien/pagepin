@@ -129,6 +129,28 @@ async function setup() {
       displayName: 'Carol',
       createdAt: nowIso(),
     },
+    {
+      id: 'u-dave',
+      email: 'DAVE@Example.com', // 大写 email:搜索须 lower() 后仍命中
+      handle: 'dave',
+      displayName: 'Dave Long',
+      createdAt: nowIso(),
+    },
+    {
+      id: 'u-eve',
+      email: 'eve@example.com',
+      handle: 'eve',
+      displayName: 'Eve',
+      disabled: true, // 禁用账号:不出结果
+      createdAt: nowIso(),
+    },
+    {
+      id: 'u-frank',
+      email: 'frank@example.com',
+      handle: null, // handle 未设(OIDC 首登):invite 侧不可用,不出结果
+      displayName: 'Frank',
+      createdAt: nowIso(),
+    },
   ]);
   await seedSite(db, storage, 'demo');
   const deps: AppDeps = { config: cfg, db, storage };
@@ -289,7 +311,7 @@ test('member add validation: invalid role 422 (incl. owner), unknown/absent hand
   );
 });
 
-test('members routes are owner-only: member 403, stranger 404 on all three', async () => {
+test('members routes are owner-only: member 403, stranger 404 on all four', async () => {
   const { db, app, ownerCookie, bobCookie, carolCookie } = await setup();
   // bob 作为 editor 成员(行直接落库,走解析而非 PUT —— PUT 本身就是被测对象)
   await db.insert(siteMembers).values({
@@ -302,6 +324,7 @@ test('members routes are owner-only: member 403, stranger 404 on all three', asy
 
   for (const [method, path] of [
     ['GET', '/api/sites/demo/members'],
+    ['GET', '/api/sites/demo/members/search?q=bo'],
     ['PUT', '/api/sites/demo/members'],
     ['DELETE', '/api/sites/demo/members/x'],
   ] as const) {
@@ -468,4 +491,107 @@ test('PAT bearer manages members and grants the same as cookies', async () => {
   });
   assert.equal(grant.status, 200);
   assert.equal(((await grant.json()) as GrantOut).group_name, 'eng');
+});
+
+// ───────────────────────── C. 成员搜索(owner-only 下拉数据源) ─────────────────────────
+
+interface SearchOut {
+  handle: string;
+  display_name: string | null;
+}
+
+async function search(
+  app: Hono<AppEnv>,
+  q: string,
+  cookie: string,
+): Promise<{ status: number; results: SearchOut[] }> {
+  const res = await api(app, 'GET', `/api/sites/demo/members/search?q=${encodeURIComponent(q)}`, {
+    cookie,
+  });
+  return {
+    status: res.status,
+    results: res.ok ? ((await res.json()) as { results: SearchOut[] }).results : [],
+  };
+}
+
+test('member search: handle/display_name/email substrings, privacy filters, field shape', async () => {
+  const { app, ownerCookie } = await setup();
+
+  // handle 子串
+  const byHandle = await search(app, 'ob', ownerCookie);
+  assert.equal(byHandle.status, 200);
+  assert.deepEqual(
+    byHandle.results.map((r) => r.handle),
+    ['bob'],
+  );
+
+  // display_name 子串(大小写不敏感:q 大写仍命中)
+  const byName = await search(app, 'LONG', ownerCookie);
+  assert.deepEqual(
+    byName.results.map((r) => r.handle),
+    ['dave'],
+  );
+
+  // email 子串(存储侧大写 email;lower() 后命中;返回体里绝不出现 email 字段)
+  const byEmail = await search(app, 'dave@example', ownerCookie);
+  assert.deepEqual(
+    byEmail.results.map((r) => r.handle),
+    ['dave'],
+  );
+  assert.deepEqual(Object.keys(byEmail.results[0]!).sort(), ['display_name', 'handle']);
+  assert.equal(byEmail.results[0]!.display_name, 'Dave Long');
+
+  // 隐私:禁用账号(eve)、handle 未设(frank,email 命中也不出)、本人(alice)都不出
+  for (const q of ['ev', 'fran', 'ali']) {
+    const r = await search(app, q, ownerCookie);
+    assert.equal(r.results.length, 0, `q=${q} must return nothing`);
+  }
+
+  // 至少 2 个字符;无 q 参数同口径
+  for (const q of ['', 'a', '  b ']) {
+    const r = await search(app, q, ownerCookie);
+    assert.equal(r.status, 200);
+    assert.equal(r.results.length, 0, `q=${JSON.stringify(q)} stays under the 2-char floor`);
+  }
+  const noParam = await api(app, 'GET', '/api/sites/demo/members/search', {
+    cookie: ownerCookie,
+  });
+  assert.equal(noParam.status, 200);
+  assert.deepEqual(((await noParam.json()) as { results: unknown[] }).results, []);
+
+  // 未知站点 → 404 site.notFound
+  const missing = await api(app, 'GET', '/api/sites/nope/members/search?q=bo', {
+    cookie: ownerCookie,
+  });
+  assert.equal(missing.status, 404);
+
+  // LIKE 通配符是通配符,不是错误
+  const wild = await api(app, 'GET', '/api/sites/demo/members/search?q=%25_%25', {
+    cookie: ownerCookie,
+  });
+  assert.equal(wild.status, 200);
+  assert.deepEqual(
+    ((await wild.json()) as { results: SearchOut[] }).results.map((x) => x.handle),
+    ['bob', 'carol', 'dave'],
+    'wildcards act as wildcards, not errors',
+  );
+});
+
+test('member search: max 8 results, ordered by handle', async () => {
+  const { db, app, ownerCookie } = await setup();
+  const rows = Array.from({ length: 10 }, (_, i) => ({
+    id: `u-zz${i}`,
+    email: `zz${i}@example.com`,
+    handle: `zzuser${String(i).padStart(2, '0')}`,
+    displayName: `Bulk User ${i}`,
+    createdAt: nowIso(),
+  }));
+  await db.insert(users).values(rows);
+  const r = await search(app, 'zzuser', ownerCookie);
+  assert.equal(r.results.length, 8, 'LIMIT 8 caps the result set');
+  assert.deepEqual(
+    r.results.map((x) => x.handle),
+    Array.from({ length: 8 }, (_, i) => `zzuser${String(i).padStart(2, '0')}`),
+    'first 8 handles, ordered by handle asc',
+  );
 });

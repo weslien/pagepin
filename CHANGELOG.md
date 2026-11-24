@@ -8,6 +8,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Member invite search.** `GET /api/sites/{slug}/members/search?q=` gives site
+  owners a user picker for the members panel: it matches handle, display name,
+  and email substrings (2+ characters, case-insensitive, max 8 rows). Results
+  include only active users with a handle, never the caller, and return only
+  `handle` and `display_name` — email is searchable but never exposed. The
+  console member input is now a debounced search box with a pick dropdown;
+  the exact-handle flow is unchanged.
+
 - **Signed share links — review without accounts.** `POST /api/sites/{slug}/share-link`
   mints a stateless, expiring `?key=` URL (default 72h, capped by the new
   `PAGEPIN_SHARE_MAX_HOURS`, default 720h). Anyone opening it gets a per-browser

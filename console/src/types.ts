@@ -136,6 +136,12 @@ export interface SiteMember {
   created_at: string;
 }
 
+/** One row of GET /api/sites/:slug/members/search (owner-only user picker). */
+export interface UserSearchResult {
+  handle: string;
+  display_name: string | null;
+}
+
 /** One row of GET /api/sites/:slug/group-grants (owner-only list). */
 export interface GroupGrant {
   id: string;

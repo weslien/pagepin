@@ -20,6 +20,7 @@ import type {
   SiteRole,
   TokenItem,
   Usage,
+  UserSearchResult,
   VersionsOut,
   Visibility,
 } from './types';
@@ -226,6 +227,10 @@ export const api = {
     request<{ ok: true }>(
       `/api/sites/${encodeURIComponent(slug)}/members/${encodeURIComponent(id)}`,
       { method: 'DELETE' },
+    ),
+  searchMembers: (slug: string, q: string) =>
+    request<{ results: UserSearchResult[] }>(
+      `/api/sites/${encodeURIComponent(slug)}/members/search?q=${encodeURIComponent(q)}`,
     ),
 
   listGroupGrants: (slug: string) =>

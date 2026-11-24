@@ -6,7 +6,21 @@
  * 失败则 current 不动,旧版本继续服务。
  */
 
-import { and, asc, count, desc, eq, inArray, isNull, lt } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  lt,
+  ne,
+  or,
+  sql,
+} from 'drizzle-orm';
+import type { SQLWrapper } from 'drizzle-orm';
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 
@@ -1208,6 +1222,37 @@ export function makeSiteRoutes(deps: AppDeps, mw: AuthMiddleware): Hono<AppEnv> 
     });
   });
 
+  // ---- 成员搜索(owner-only):加成员下拉选择器的数据源 —— 按 handle / display_name /
+  //  email 子串找人(起 2 个字符)。隐私口径:只出未禁用且 handle 已设的人,排除本人;
+  //  只回 handle 与 display_name —— email 可搜索但绝不返回。LIMIT 8 封住枚举半径。
+  //  q 里的 % 与 _ 按 LIKE 通配符解释(三家方言一致);owner 鉴权 + LIMIT 下无需转义。
+  //  shortcut: %q% 全表扫且 sqlite lower() 只折叠 ASCII,用户表小、handle/email 本就 ASCII,够用;
+  //  用户量大或要搜非 ASCII 显示名时再换前缀索引 + Unicode 折叠。
+  r.get('/:slug/members/search', mw.currentUser, async (c) => {
+    const acl = await requireRole(c, db, c.get('user').id, c.req.param('slug'), 'owner');
+    if (acl instanceof Response) return acl;
+    const q = (c.req.query('q') ?? '').trim().toLowerCase();
+    if (q.length < 2 || q.length > 120) return c.json({ results: [] });
+    const pattern = `%${q}%`;
+    const match = (col: SQLWrapper) => sql`lower(${col}) like ${pattern}`;
+    const rows = await db
+      .select({ handle: users.handle, displayName: users.displayName })
+      .from(users)
+      .where(
+        and(
+          eq(users.disabled, false),
+          ne(users.id, c.get('user').id),
+          isNotNull(users.handle),
+          or(match(users.handle), match(users.displayName), match(users.email)),
+        ),
+      )
+      .orderBy(asc(users.handle))
+      .limit(8);
+    return c.json({
+      results: rows.map((u) => ({ handle: u.handle, display_name: u.displayName })),
+    });
+  });
+
   r.put('/:slug/members', mw.mutatingUser, async (c) => {
     const user = c.get('user');
     const acl = await requireRole(c, db, user.id, c.req.param('slug'), 'owner');
@@ -1216,7 +1261,7 @@ export function makeSiteRoutes(deps: AppDeps, mw: AuthMiddleware): Hono<AppEnv> 
     if (body === null) return jsonError(c, 422, 'request.body.malformed');
     const role = body.role;
     if (!grantableRole(role)) return jsonError(c, 422, 'site.members.roleInvalid');
-    // handle 即 URL 路径身份,精确匹配;缺失/类型错/查无 → 同一 404 口径(不新增搜索端点,设计§6)
+    // handle 即 URL 路径身份,精确匹配;缺失/类型错/查无 → 同一 404 口径(选择器先经上方 /members/search 查人)
     const target =
       typeof body.handle === 'string'
         ? ((await db.select().from(users).where(eq(users.handle, body.handle)))[0] ?? null)
