@@ -100,6 +100,15 @@ function redirectUri(c: Context, cfg: Config): string {
   return `${cfg.baseUrl}/auth/callback`;
 }
 
+/** Post-logout redirect URI for RP-initiated logout (must be registered with the IdP). */
+function postLogoutRedirectUri(c: Context, cfg: Config): string {
+  if (cfg.mode === 'dual') {
+    const host = c.req.header('host') ?? '';
+    return `${cfg.externalScheme}://${host}/auth/logout/done`;
+  }
+  return `${cfg.baseUrl}/auth/logout/done`;
+}
+
 /** 社交登录回调地址(每家一条 `/auth/social/<provider>/callback`,需在各 provider 注册)。
  * authorize 与 token 交换必须用同一个 redirect_uri,故两处都走本函数。 */
 function socialRedirectUri(c: Context, cfg: Config, provider: string): string {
@@ -843,13 +852,34 @@ export function makeAuthRoutes(deps: AppDeps, plane: Plane): Hono<AppEnv> {
       if (hint) {
         clearIdTokenCookie(c);
         try {
-          return c.redirect(await buildEndSessionUrl(cfg.oidc!, hint), 302);
+          return c.redirect(
+            await buildEndSessionUrl(cfg.oidc!, hint, postLogoutRedirectUri(c, cfg)),
+            302,
+          );
         } catch {
           /* logout must never fail on an IdP outage */
         }
       }
     }
     return c.redirect('/', 302);
+  });
+
+  // RP-initiated logout return trip: the IdP redirects here after ending its session.
+  // Defensive cookie clearing ensures no stale auth state survives a partial logout.
+  app.get('/auth/logout/done', (c) => {
+    clearLoginCookies(c, plane);
+    clearIdTokenCookie(c);
+    const locale = localeOf(c);
+    return c.html(
+      gateDoc(
+        t(locale, 'auth.html.logout.doneTitle'),
+        `<div class="chip chip-teal">${LOCK_SVG}</div>
+<h1>${escapeHtml(t(locale, 'auth.html.logout.doneHeading'))}</h1>
+<p class="body">${escapeHtml(t(locale, 'auth.html.logout.doneBody'))}</p>
+<a class="btn btn-primary" href="${escapeHtml(consoleBase(cfg))}">${escapeHtml(t(locale, 'auth.html.verify.goButton'))}</a>`,
+        locale,
+      ),
+    );
   });
 
   // 邮箱验证落地页:点邮件里的链接到这里。token 无状态(同会话密钥签),用途+签发时邮箱都比对,

@@ -91,12 +91,17 @@ export async function buildAuthorizeUrl(
   return `${disc.authorization_endpoint}${sep}${params.toString()}`;
 }
 
-/** RP-initiated logout: end-session URL + id_token_hint. Throws an OidcError when
- *  discovery exposes no end_session_endpoint — the caller must then fall back to a local logout. */
-export async function buildEndSessionUrl(cfg: OidcConfig, idTokenHint: string): Promise<string> {
+/** RP-initiated logout: end-session URL + id_token_hint + client_id + optional post_logout_redirect_uri.
+ *  Throws an OidcError when discovery exposes no end_session_endpoint — the caller must then fall back to a local logout. */
+export async function buildEndSessionUrl(
+  cfg: OidcConfig,
+  idTokenHint: string,
+  postLogoutRedirectUri?: string,
+): Promise<string> {
   const disc = await discover(cfg.issuer);
   if (!disc.end_session_endpoint) throw new OidcError('auth.oidc.noEndSession');
-  const params = new URLSearchParams({ id_token_hint: idTokenHint });
+  const params = new URLSearchParams({ id_token_hint: idTokenHint, client_id: cfg.clientId });
+  if (postLogoutRedirectUri) params.set('post_logout_redirect_uri', postLogoutRedirectUri);
   const sep = disc.end_session_endpoint.includes('?') ? '&' : '?';
   return `${disc.end_session_endpoint}${sep}${params.toString()}`;
 }

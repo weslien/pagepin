@@ -242,12 +242,12 @@ test('fake-IdP login loop plants the httpOnly hint; logout ends both sessions', 
     assert.equal(out.status, 302);
     const loc = new URL(out.headers.get('location')!);
     assert.equal(`${loc.origin}${loc.pathname}`, idp.endSession);
-    assert.equal(
-      [...loc.searchParams.keys()].length,
-      1,
-      'no token material in the URL beyond id_token_hint',
-    );
     assert.equal(loc.searchParams.get('id_token_hint'), ID_TOKEN);
+    assert.equal(loc.searchParams.get('client_id'), 'test-client');
+    assert.equal(
+      loc.searchParams.get('post_logout_redirect_uri'),
+      'http://localhost:8000/auth/logout/done',
+    );
     const outJar = cookieJar(setCookies(out));
     assert.equal(outJar.get('pp_session'), '');
     assert.equal(outJar.get('pp_csrf'), '');
@@ -255,6 +255,20 @@ test('fake-IdP login loop plants the httpOnly hint; logout ends both sessions', 
   } finally {
     await idp.close();
   }
+});
+
+test('post-logout landing page clears any remaining cookies', async () => {
+  const { app } = await setup(oidcEnv('http://127.0.0.1:1/'));
+  const res = await app.fetch(
+    new Request('http://localhost/auth/logout/done', {
+      headers: { cookie: 'pp_session=x; pp_csrf=y; pp_id_token=z' },
+    }),
+  );
+  assert.equal(res.status, 200);
+  const jar = cookieJar(setCookies(res));
+  assert.equal(jar.get('pp_session'), '');
+  assert.equal(jar.get('pp_csrf'), '');
+  assert.equal(jar.get('pp_id_token'), '');
 });
 
 test('session renewal slides the hint cookie alongside pp_session', async () => {

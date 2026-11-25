@@ -34,6 +34,10 @@ export const authHtml: Record<Locale, Record<string, string>> = {
     'auth.html.verify.successTitle': 'Email verified · pagepin',
     'auth.html.verify.successHeading': 'Email verified',
     'auth.html.verify.successBody': 'Thanks — {email} is confirmed.',
+    // —— RP-initiated logout 落地页(GET /auth/logout/done)——
+    'auth.html.logout.doneTitle': 'Signed out · pagepin',
+    'auth.html.logout.doneHeading': 'Signed out',
+    'auth.html.logout.doneBody': 'You are signed out of pagepin.',
 
     // —— 邮箱验证信(sendVerificationEmail)——
     'email.verify.subject': 'Verify your pagepin email',
@@ -71,6 +75,10 @@ export const authHtml: Record<Locale, Record<string, string>> = {
     'auth.html.verify.successTitle': '邮箱已验证 · pagepin',
     'auth.html.verify.successHeading': '邮箱已验证',
     'auth.html.verify.successBody': '谢谢 —— {email} 已确认。',
+    // —— RP-initiated logout 落地页(GET /auth/logout/done)——
+    'auth.html.logout.doneTitle': '已退出 · pagepin',
+    'auth.html.logout.doneHeading': '已退出',
+    'auth.html.logout.doneBody': '你已成功退出 pagepin。',
 
     // —— 邮箱验证信(sendVerificationEmail)——
     'email.verify.subject': '验证你的 pagepin 邮箱',
