@@ -174,8 +174,17 @@ export function Admin() {
   const siteMode = settings?.site_access_mode ?? 'open';
   const siteModeLocked = settings?.site_access_mode_locked ?? false;
 
-  const changeSiteMode = (mode: SiteAccessMode) => {
+  const changeSiteMode = async (mode: SiteAccessMode) => {
     if (siteModeLocked || mode === siteMode || !settings) return;
+    const label = t(`admin.access.${mode}.label`);
+    if (
+      !(await confirmDanger({
+        title: t('admin.access.confirmTitle', { mode: label }),
+        body: t('admin.access.confirmBody'),
+        confirmText: t('admin.access.confirmGo', { mode: label }),
+      }))
+    )
+      return;
     api
       .setSiteAccessMode(mode)
       .then(() => {

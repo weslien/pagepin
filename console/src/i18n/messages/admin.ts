@@ -59,6 +59,10 @@ export const admin: Record<Locale, Record<string, string>> = {
       'Private sites serve the owner, site members, and group grants; signed-in non-members get 403. Share links and public windows stay open.',
     'admin.access.changed': 'Site access: {mode}',
     'admin.access.changeFailed': 'Could not change site access',
+    'admin.access.confirmTitle': 'Switch site access to “{mode}”?',
+    'admin.access.confirmBody':
+      'Takes effect immediately for every site. Current visitors may lose or regain access.',
+    'admin.access.confirmGo': 'Switch to {mode}',
     'admin.access.lockedPre': 'Locked by',
     'admin.access.lockedPost': '— unset it to change here.',
 
@@ -209,6 +213,9 @@ export const admin: Record<Locale, Record<string, string>> = {
       '私有站点仅向所有者、站点成员与组授予开放；已登录的非成员收到 403。分享链接与公开窗口保持开放。',
     'admin.access.changed': '站点访问模式：{mode}',
     'admin.access.changeFailed': '无法切换站点访问模式',
+    'admin.access.confirmTitle': '把站点访问切换为「{mode}」？',
+    'admin.access.confirmBody': '对所有站点立即生效。访客可能因此失去或重新获得访问权限。',
+    'admin.access.confirmGo': '切换为 {mode}',
     'admin.access.lockedPre': '已被',
     'admin.access.lockedPost': '锁定 —— 取消该环境变量后方可在此修改。',
 
