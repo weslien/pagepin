@@ -35,6 +35,7 @@ export interface OidcIdentity {
   email?: string;
   /** IdP 是否断言该邮箱已验证(email_verified claim);未验证的邮箱不得作账号键/并号提示。 */
   emailVerified?: boolean;
+  groups?: string[];
 }
 
 const TIMEOUT_MS = 15_000; // IdP 请求 15s 超时
@@ -143,5 +144,8 @@ export async function exchangeCode(
       : undefined;
   const email = typeof info.email === 'string' && info.email ? info.email : undefined;
   const emailVerified = info.email_verified === true;
-  return { sub: String(sub), name, preferredUsername, email, emailVerified };
+  const groups = Array.isArray(info.groups)
+    ? (info.groups as unknown[]).filter((g): g is string => typeof g === 'string')
+    : undefined;
+  return { sub: String(sub), name, preferredUsername, email, emailVerified, groups };
 }

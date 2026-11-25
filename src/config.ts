@@ -18,6 +18,8 @@ export interface OidcConfig {
   scopes: string;
   /** 附加到 authorize URL 的额外 query(如 Casdoor 的 provider_hint),JSON 对象 */
   authParams: Record<string, string>;
+  /** IdP 里标识管理员身份的 group;配置了时 isAdmin 完全由 group 成员资格控制 */
+  adminGroup?: string;
 }
 
 export interface S3Config {
@@ -174,6 +176,7 @@ export function loadConfig(env: Env): Config {
       clientSecret,
       scopes: str(env, 'PAGEPIN_OIDC_SCOPES', 'openid profile email'),
       authParams,
+      adminGroup: env.PAGEPIN_OIDC_ADMIN_GROUP || undefined,
     };
   }
 

@@ -261,6 +261,7 @@ interface FederatedLogin {
   name?: string;
   email?: string;
   emailVerified?: boolean;
+  groups?: string[];
 }
 
 /** 社交 / OIDC 登录解析(取代旧 upsertOidcUser):恒按 (provider, sub) 查 identities → 解析 userId。
@@ -298,6 +299,14 @@ export async function upsertFederatedUser(deps: AppDeps, fed: FederatedLogin): P
         canonicalEmail: user.canonicalEmail ?? claim,
         emailVerified: user.emailVerified || !!claim,
         lastLoginAt: now,
+        ...(fed.groups !== undefined
+          ? {
+              oidcGroups: fed.groups,
+              ...(deps.config.oidc?.adminGroup !== undefined
+                ? { isAdmin: fed.groups.includes(deps.config.oidc.adminGroup) }
+                : {}),
+            }
+          : {}),
       })
       .where(eq(users.id, user.id));
     return (await deps.db.select().from(users).where(eq(users.id, user.id)))[0]!;
@@ -341,7 +350,11 @@ export async function upsertFederatedUser(deps: AppDeps, fed: FederatedLogin): P
     canonicalEmail: freeCanonical,
     emailVerified: !!freeCanonical,
     displayName: fed.name ?? null,
-    isAdmin: n === 0,
+    oidcGroups: fed.groups ?? null,
+    isAdmin:
+      fed.groups !== undefined && deps.config.oidc?.adminGroup !== undefined
+        ? fed.groups.includes(deps.config.oidc.adminGroup)
+        : n === 0,
     createdAt: now,
     lastLoginAt: now,
   };
@@ -637,6 +650,7 @@ export function makeAuthRoutes(deps: AppDeps, plane: Plane): Hono<AppEnv> {
       name: info.name ?? info.preferredUsername,
       email: info.email,
       emailVerified: info.emailVerified,
+      groups: info.groups,
     });
     if (user.disabled) return jsonError(c, 403, 'auth.account.disabled');
     await setLoginCookies(c, cfg, plane, user.id, user.handle, user.sessionEpoch);

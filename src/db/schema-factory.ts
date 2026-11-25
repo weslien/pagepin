@@ -29,6 +29,7 @@ export function buildSchema(kit: ColumnKit) {
       sessionEpoch: int('session_epoch').notNull().default(0),
       handle: str('handle', 64),
       displayName: str('display_name', 255),
+      oidcGroups: json('oidc_groups'),
       isAdmin: bool('is_admin').notNull().default(false),
       disabled: bool('disabled').notNull().default(false),
       createdAt: str('created_at', 40).notNull(),

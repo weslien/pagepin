@@ -47,6 +47,7 @@ export const users = sqliteTable(
     sessionEpoch: integer('session_epoch').notNull().default(0),
     handle: text('handle'), // 路径用户名(首登确认;唯一、URL 安全)
     displayName: text('display_name'),
+    oidcGroups: text('oidc_groups', { mode: 'json' }).$type<string[] | null>(),
     isAdmin: integer('is_admin', { mode: 'boolean' }).notNull().default(false),
     disabled: integer('disabled', { mode: 'boolean' }).notNull().default(false), // 禁用后所有认证路径即拒(控制面/数据面/登录入口);管理员可恢复
     createdAt: text('created_at').notNull(),
